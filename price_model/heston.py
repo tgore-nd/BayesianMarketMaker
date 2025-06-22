@@ -1,6 +1,6 @@
 import numpy as np
 
-def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0=1.0):
+def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
     """
     Heston characteristic function: returns E[exp(i * phi * ln(S_T))]
     following the risk-neutral characteristic function form.
@@ -41,8 +41,23 @@ def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0=1.0):
 def bayad_char_func():
     pass
 
-def price_prob(K, characteristic_func):
-    pass
+def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K, N = 2**12, B = 200):
+    # Generate discrete grid of values (larger B captures tail behavior, higher N resolves oscillations)
+    eta = B / N
+    u = (np.arange(N) * eta)[1:] # filter out discontinuity at u = 0
+    lnK = np.log(K)
+
+    # Weights - good practice to multiply the first term by 1/2
+    weights = np.ones(N)
+    weights[0] *= 1/2
+
+    # Evaluate integrand
+    integrand = (np.exp(-1j * u * lnK) * characteristic_func(u, tau, kappa, theta, sigma, rho, v0, r, S0) / (1j * u)) * weights
+
+    # Perform FFT
+    integral_approx = np.real((np.fft.fft(integrand) * eta)[0])
+
+    return np.clip(0.5 + integral_approx / np.pi, 0, 1)
 
 if __name__ == "__main__":
     print(heston_cf(1, 1, 1, 1, 1, 1, 1, 1, 1))
