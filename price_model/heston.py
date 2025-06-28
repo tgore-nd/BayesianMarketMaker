@@ -40,6 +40,7 @@ def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
     )
     return np.exp(C + D * v0 + i * phi * np.log(S0))
 
+
 def get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0):
     """Get the values a, b for use in FFT"""
     c1 = np.log(S0) + r * tau + (1 - np.exp(-kappa*tau)) * (theta - v0) / (2 * kappa) - 1/2 * theta * tau
@@ -47,51 +48,20 @@ def get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0):
     return (c1 - 24*np.sqrt(np.abs(c2)), c1 + 24*np.sqrt(np.abs(c2)))
 
 
-def heston_price_pdf(tau, kappa, theta, sigma, rho, v0, r, S0, N=2**12):
-    a, b = get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0)
-    du = 2 * np.pi / (b - a)
-    u = du * np.array([k - N//2 for k in range(N)])
-    u[0] = 1e-22
-
-    # Evaluate CF at 
-    psi = heston_cf(u, tau, kappa, theta, sigma, rho, v0, r, S0)
-
-    # Trapezoidal weigthts
-    weights = np.ones(N)
-    weights[0], weights[-1] = 0.5, 0.5
-    
-    # Build integrand
-    integrand = np.exp(-1j * u * a) * psi * weights
-    #integrand = np.fft.ifftshift(integrand)
-
-    # Run inverse FFT
-    fft_vals = np.fft.ifft(integrand) * N * du / np.pi
-    return fft_vals.real
-
-def transform_heston_cf(tau, kappa, theta, sigma, rho, v0, r, S0, N = 2**12):
-    # Get integration bounds
-    a, b = get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0)
-    
-    # Create u grid
-    u = np.array([k - N/2 for k in range(N)]) / (b - a)
-
-    C = np.array([(-1)**((a/(b - a) + k/N)*N) for k in range(N)])
-    phi = np.array([(-1)**((2*a/(b - a))*k) * heston_cf(2*np.pi*u[k], tau, kappa, theta, sigma, rho, v0, r, S0) for k in range(N)])
-    return np.abs(np.sum(np.dot(C, phi)).real)
-
-
 def heston_pdf_fft(kappa, theta, sigma, rho, v0, r, s0, tau):
-    N = 2**12
-    eta = 0.1
-    u = np.arange(N) * eta # this was incorrect in previous version
+    N = 2**12 # number of pts in freq space
+    eta = 0.1 # spacing of frequency grid
+    u = np.arange(N) * eta # grid of freq values used to evaluate heston_cf
     i = 1j
 
-    #cf_vals = np.array([heston_cf(u_k, tau, kappa, theta, sigma, rho, v0, r, s0) for u_k in u])
+    # Evaluate char func
     cf_vals = heston_cf(u, tau, kappa, theta, sigma, rho, v0, r, s0)
 
-    lambd = 2 * np.pi / (N * eta)
+    # Construct symmetric grid of log prices for density function evaluation
+    lambd = 2 * np.pi / (N * eta) # spacing between log prices
     x = -N // 2 * lambd + lambd * np.arange(N)
 
+    # Get PDF values
     integrand = cf_vals * np.exp(-i * u * (-N // 2 * lambd))
     fft_vals = np.fft.fft(integrand)
     pdf_vals = np.real(fft_vals) / (2 * np.pi)
@@ -100,6 +70,7 @@ def heston_pdf_fft(kappa, theta, sigma, rho, v0, r, s0, tau):
     pdf_vals = pdf_vals / np.trapezoid(pdf_vals, S) # normalization
 
     return S, pdf_vals
+
 
 def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K, N = 2**12, B = 200):
     # Generate discrete grid of values (larger B captures tail behavior, higher N resolves oscillations)
@@ -119,6 +90,7 @@ def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K,
     integral_approx = np.real((np.fft.fft(integrand) * eta)[0])
 
     return np.clip(0.5 + integral_approx / np.pi, 0, 1)
+
 
 if __name__ == "__main__":
     kappa = 2.0
