@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
@@ -39,10 +40,14 @@ def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
     )
     return np.exp(C + D * v0 + i * phi * np.log(S0))
 
-
-def bayad_char_func():
-    pass
-
+def heston_cf_extern(u, tau, kappa, theta, sigma, rho, v0, r, S0): 
+    t0 = 0.0 ;  q = 0.0
+    m = np.log(S0) + (r - q)*(tau-t0)
+    D = np.sqrt((rho*sigma*1j*u - kappa)**2 + sigma**2*(1j*u + u**2))
+    C = (kappa - rho*sigma*1j*u - D) / (kappa - rho*sigma*1j*u + D)
+    beta = ((kappa - rho*sigma*1j*u - D)*(1-np.exp(-D*(tau-t0)))) / (sigma**2*(1-C*np.exp(-D*(T-t0))))
+    alpha = ((kappa*theta)/(sigma**2))*((kappa - rho*sigma*1j*u - D)*(tau-t0) - 2*np.log((1-C*np.exp(-D*(tau-t0))/(1-C))))
+    return np.exp(1j*u*m + alpha + beta*v0)
 
 def get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0):
     """Get the values a, b for use in FFT"""
@@ -54,7 +59,7 @@ def get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0):
 def heston_price_pdf(tau, kappa, theta, sigma, rho, v0, r, S0, N=2**12):
     a, b = get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0)
     du = 2 * np.pi / (b - a)
-    u = du * np.array([k - N/2 for k in range(N)])
+    u = du * np.array([k - N//2 for k in range(N)])
     u[0] = 1e-22
 
     # Evaluate CF at 
@@ -66,6 +71,7 @@ def heston_price_pdf(tau, kappa, theta, sigma, rho, v0, r, S0, N=2**12):
     
     # Build integrand
     integrand = np.exp(-1j * u * a) * psi * weights
+    integrand = np.fft.ifftshift(integrand)
 
     # Run inverse FFT
     fft_vals = np.fft.ifft(integrand) * N * du / np.pi
@@ -92,4 +98,12 @@ def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K,
     return np.clip(0.5 + integral_approx / np.pi, 0, 1)
 
 if __name__ == "__main__":
-    print(price_prob(heston_cf, 1, 1, 1, 1, 1, 1, 1, 1, 1))
+    # a, b = get_integration_range(1, 1, 1, 1, 1, 1, 1, 1)
+    # N = 2**12
+    # x = a + np.arange(N) * (b - a) / (N)
+    # pdf_vals = heston_price_pdf(0.42, 0.23, 0.123, 0.167, 0.67, 0.87, 0.08, 100)
+    # print(np.trapz(pdf_vals, x))
+    # plt.plot(pdf_vals)
+    # plt.show()
+    print(heston_cf(1, 1, 1, 1, 1, 1, 1, 1, 1))
+    print(heston_cf_extern(1, 1, 1, 1, 1, 1, 1, 1, 1))
