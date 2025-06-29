@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.integrate import quad
 
 
 def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
@@ -41,41 +42,46 @@ def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
     return np.exp(C + D * v0 + i * phi * np.log(S0))
 
 
-def get_integration_range(tau, kappa, theta, sigma, rho, v0, r, S0):
-    """Get the values a, b for use in FFT"""
-    c1 = np.log(S0) + r * tau + (1 - np.exp(-kappa*tau)) * (theta - v0) / (2 * kappa) - 1/2 * theta * tau
-    c2 = theta / (8 * kappa**3) * (-sigma**2 * np.exp(-2 * kappa * tau) + 4 * sigma * np.exp(-kappa * tau) * (sigma - 2 * kappa * rho) + 2 * kappa * tau * (4 * kappa**2 + sigma**2 - 4 * kappa * sigma * rho) + sigma * (8 * kappa * rho - 3 * sigma))
-    return (c1 - 24*np.sqrt(np.abs(c2)), c1 + 24*np.sqrt(np.abs(c2)))
+def heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau):
+    """Find the likelihood of S in time tau at current price S0."""
+    # Get log prices
+    if S == 0:
+        # Asymptotically, the likelihood will be zero here (look at the graph to confirm)
+        return 0
+    
+    x = np.log(S)
+
+    # Get integrand
+    def integrand(u, x, kappa, theta, sigma, rho, v0, r, S0, tau):
+        """Evaluate integrand at some log price x."""
+        return np.real(np.exp(-1j*u*x) * heston_cf(u, tau, kappa, theta, sigma, rho, v0, r, S0))
+    
+    # Perform inverse Fourier transform to get the PDF of x
+    val, _ = quad(lambda u: integrand(u, x, kappa, theta, sigma, rho, v0, r, S0, tau),
+                  -np.inf, np.inf, # bounds
+                  )
+    
+    val /= (2 * np.pi)
+
+    # Switch to the PDF of S
+    return val / S
 
 
-def heston_pdf_fft(kappa, theta, sigma, rho, v0, r, s0, tau):
-    N = 2**12 # number of pts in freq space
-    eta = 0.1 # spacing of frequency grid
-    u = np.arange(N) * eta # grid of freq values used to evaluate heston_cf
-    i = 1j
+def likelihood_prob(K, kappa, theta, sigma, rho, v0, r, S0, tau):
+    """Find P(S > K). Not used in practice, but confirms that the likelihood function is correct."""
+    S = np.arange(0, K)
+    f = np.array([heston_likelihood(S_k, kappa, theta, sigma, rho, v0, r, S0, tau) for S_k in S])
 
-    # Evaluate char func
-    cf_vals = heston_cf(u, tau, kappa, theta, sigma, rho, v0, r, s0)
-
-    # Construct symmetric grid of log prices for density function evaluation
-    lambd = 2 * np.pi / (N * eta) # spacing between log prices
-    x = -N // 2 * lambd + lambd * np.arange(N)
-
-    # Get PDF values
-    integrand = cf_vals * np.exp(-i * u * (-N // 2 * lambd))
-    fft_vals = np.fft.fft(integrand)
-    pdf_vals = np.real(fft_vals) / (2 * np.pi)
-
-    S = np.exp(x) # convert out of log prices
-    pdf_vals = pdf_vals / np.trapezoid(pdf_vals, S) # normalization
-
-    return S, pdf_vals
+    return 1 - np.trapezoid(f, S)
 
 
 def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K, N = 2**12, B = 200):
+    """Return the probability P(S > K). 
+    
+    This method is based on Gil-Peleaz (1951), particularly a manipulated version of F(x) given by Wendel (1961)."""
     # Generate discrete grid of values (larger B captures tail behavior, higher N resolves oscillations)
     eta = B / N
-    u = (np.arange(N) * eta)
+    u = np.arange(N) * eta
     u[0] = 1e-22 # filter out discontinuity at u = 0
     lnK = np.log(K)
 
@@ -89,7 +95,7 @@ def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K,
     # Perform FFT
     integral_approx = np.real((np.fft.fft(integrand) * eta)[0])
 
-    return np.clip(0.5 + integral_approx / np.pi, 0, 1)
+    return 0.5 + integral_approx / np.pi
 
 
 if __name__ == "__main__":
@@ -99,15 +105,12 @@ if __name__ == "__main__":
     rho = -0.7
     v0 = 0.04
     r = 0.01
-    s0 = 100
+    S0 = 100
     tau = 1.0
+    #K = 125
 
-    S, pdf_vals = heston_pdf_fft(kappa, theta, sigma, rho, v0, r, s0, tau)
-    plt.plot(S, pdf_vals)
-    print(pdf_vals)
-    plt.title("Heston Model PDF of Stock Price")
-    plt.xlabel("Stock Price")
-    plt.ylabel("Density")
-    plt.xlim(0, 200)
-    plt.grid(True)
-    plt.show()
+    K = np.arange(0, 100)
+
+    for k_i in K:
+        print(k_i, price_prob(heston_cf, tau, kappa, theta, sigma, rho, v0, r, S0, k_i) - likelihood_prob(k_i, kappa, theta, sigma, rho, v0, r, S0, tau))
+        # Overestimate: negative, underestimate: positive; imprecision is probably just due to using multiple integral approximation methods
