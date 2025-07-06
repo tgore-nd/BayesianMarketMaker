@@ -1,9 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import quad
+from typing import Callable
 
 
-def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
+def heston_cf(phi: np.ndarray, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float) -> np.ndarray:
     """
     Heston characteristic function: returns E[exp(i * phi * ln(S_T))]
     following the risk-neutral characteristic function form.
@@ -13,7 +14,7 @@ def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
     phi   : complex or array_like
         Integration variable (argument of the CF), i.e. φ.
     tau   : float, passed
-        Time to maturity T (in years). Amount of time into the future you care about modeling, daily: tau = 1/252, monthly: tau = 1/12, etc
+        Time to maturity T (in YEARS). Amount of time into the future you care about modeling, daily: tau = 1/252, monthly: tau = 1/12, etc
     kappa : float, estimated
         Mean reversion rate of variance (κ).
     theta : float, estimated
@@ -42,7 +43,7 @@ def heston_cf(phi, tau, kappa, theta, sigma, rho, v0, r, S0):
     return np.exp(C + D * v0 + i * phi * np.log(S0))
 
 
-def heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau):
+def heston_likelihood(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
     """Find the likelihood of S in time tau at current price S0."""
     # Get log prices
     if S == 0:
@@ -67,7 +68,7 @@ def heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau):
     return val / S
 
 
-def likelihood_prob(K, kappa, theta, sigma, rho, v0, r, S0, tau):
+def likelihood_prob(K, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
     """Find P(S > K). Not used in practice, but confirms that the likelihood function is correct."""
     S = np.arange(0, K)
     f = np.array([heston_likelihood(S_k, kappa, theta, sigma, rho, v0, r, S0, tau) for S_k in S])
@@ -75,7 +76,7 @@ def likelihood_prob(K, kappa, theta, sigma, rho, v0, r, S0, tau):
     return 1 - np.trapezoid(f, S)
 
 
-def price_prob(characteristic_func, tau, kappa, theta, sigma, rho, v0, r, S0, K, N = 2**12, B = 200):
+def price_prob(characteristic_func: Callable, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, K: float, N: int = 2**12, B: int = 200):
     """Return the probability P(S > K). 
     
     This method is based on Gil-Peleaz (1951), particularly a manipulated version of F(x) given by Wendel (1961)."""
@@ -112,5 +113,5 @@ if __name__ == "__main__":
     K = np.arange(0, 100)
 
     for k_i in K:
-        print(k_i, price_prob(heston_cf, tau, kappa, theta, sigma, rho, v0, r, S0, k_i) - likelihood_prob(k_i, kappa, theta, sigma, rho, v0, r, S0, tau))
+        print(k_i, price_prob(heston_cf, tau, kappa, theta, sigma, rho, v0, r, S0, k_i) - likelihood_prob(k_i, kappa, theta, sigma, rho, v0, r, S0, tau)) # type: ignore
         # Overestimate: negative, underestimate: positive; imprecision is probably just due to using multiple integral approximation methods
