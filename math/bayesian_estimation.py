@@ -34,3 +34,7 @@ def prior(kappa: float, theta: float, sigma: float, rho: float, v0: float) -> fl
 def posterior(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float):
     return heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau) * prior(kappa, sigma, theta, rho, v0)
 
+
+def U(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
+    """Evaluate the potential, the negative log of the posterior. This is used in Hamiltonian Monte Carlo."""
+    return -np.log(heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau) * prior(kappa, theta, sigma, rho, v0))
