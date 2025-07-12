@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import gamma, invgamma, uniform
-from price_model.heston import heston_likelihood # the likelihood function
+from price_models.heston import heston_likelihood # the likelihood function
 
 
 def prior(kappa: float, theta: float, sigma: float, rho: float, v0: float) -> float:
