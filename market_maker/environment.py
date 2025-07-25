@@ -1,6 +1,6 @@
-import torch
 import duckdb
 import numpy as np
+import torch
 
 class MarketEnvironment:
     """The true trading environment."""
@@ -41,9 +41,9 @@ class MarketEnvironment:
         current_profit: float = 0.0 # the profit recieved from buying/selling in a given time step
         current_pnl: float = 0.0 # profit attributed to change in stock price
 
-        env_state = torch.concat([self.prices.to_torch(), torch.tensor([mid_prices_change])])
+        env_state = torch.concat([self.prices.to_torch().ravel(), torch.tensor([mid_prices_change])], dim=0)
         model_state = torch.tensor([self.model_total_cash, self.model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
-        self.state = torch.concat([env_state, model_state], dim=2)
+        self.state = torch.stack([env_state, model_state])
         if return_state:
             return self.state
 
@@ -64,6 +64,8 @@ class MarketEnvironment:
         # Reset individual params
         num_stocks_bought = 0
         num_stocks_sold = 0
+        current_profit = 0
+        hedging_penalty = 0
 
         # Evaluate next state given the action
         close_price = self.prices["close"][0] # the price at the end of the timestep during which the order is active
@@ -76,7 +78,6 @@ class MarketEnvironment:
         # Execute orders
         # Limit orders
         buy_cost = (np.random.uniform(low_price, close_price) + fee_per_stock) * buy_limit_num
-        current_profit = 0
         if buy_limit_num > 0 and low_price <= buy_limit_price and self.model_total_cash - buy_cost >= 0:
             # Buy order (trade executes at a price in [low_price, next_price])
             self.model_total_cash -= buy_cost
@@ -93,7 +94,6 @@ class MarketEnvironment:
         
         # Market orders -- model pays the bid-ask spread
         market_price = np.random.uniform(mid_price - spread_estimate / 2, mid_price + spread_estimate / 2)
-        hedging_penalty = 0
         if num_stocks_market > 0 and self.model_total_cash - market_price >= 0:
             # Buy order
             hedging_penalty = spread_estimate * num_stocks_market
@@ -128,14 +128,15 @@ class MarketEnvironment:
         mid_prices_change = self.mid_prices[-1] - self.mid_prices[-2]
         current_pnl = self.pnl[-1]
 
-        env_state = torch.concat([self.prices.to_torch(), torch.tensor([mid_prices_change])])
+        env_state = torch.concat([self.prices.to_torch().ravel(), torch.tensor([mid_prices_change])], dim=0)
         model_state = torch.tensor([self.model_total_cash, self.model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
-        self.state = torch.concat([env_state, model_state], dim=2)
+        self.state = torch.stack([env_state, model_state])
 
         return self.state, reward # add model attributes: inventory, total cash, last quoted spread, estimated market spread
 
 
 # Examples
+env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake")
 limit_order = {"price": 0.3, "num_units": 5} # sell takes same form, but negative num_units
 limit_order = torch.tensor([0.3, 5])
 
