@@ -76,7 +76,7 @@ def likelihood_prob(K, kappa: float, theta: float, sigma: float, rho: float, v0:
     return 1 - np.trapezoid(f, S)
 
 
-def price_prob(characteristic_func: Callable, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, K: float, N: int = 2**12, B: int = 200):
+def price_prob(characteristic_func: Callable, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, K: float, N: int = 2**12, B: int = 200) -> float:
     """Return the probability P(S > K). 
     
     This method is based on Gil-Peleaz (1951), particularly a manipulated version of F(x) given by Wendel (1961)."""
@@ -97,6 +97,43 @@ def price_prob(characteristic_func: Callable, tau: float, kappa: float, theta: f
     integral_approx = np.real((np.fft.fft(integrand) * eta)[0])
 
     return 0.5 + integral_approx / np.pi
+
+
+def generate_sample_paths(tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, S0: float, r: float, N: int, M: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Generate sample paths using Bayesian-estimated parameters.
+    Inputs:
+     - tau   : time of simulation
+     - kappa : rate of mean reversion in variance process
+     - theta : long-term mean of variance process
+     - sigma : vol of vol / volatility of variance process
+     - rho   : correlation between asset returns and variance
+     - S0, v0: initial parameters for asset and variance
+     - r     : interest rate
+     - N     : number of time steps
+     - M     : number of asset paths
+    
+    Outputs:
+    - asset prices over time (numpy array)
+    - variance over time (numpy array)
+    """
+    # initialise other parameters
+    dt = tau/N
+    mu = np.array([0, 0])
+    cov = np.array([[1, rho],
+                    [rho, 1]])
+    
+    # Instantiate arrays
+    S = np.full(shape=(N + 1, M), fill_value=S0)
+    v = np.full(shape=(N + 1, M), fill_value=v0)
+
+    # Sample correlated Brownian motions under risk-neutral measure
+    Z = np.random.multivariate_normal(mu, cov, (N, M))
+    for i in range(1, N + 1):
+        S[i] = S[i - 1] * np.exp((r - 0.5 * v[i - 1])*dt + np.sqrt(v[i - 1] * dt) * Z[i - 1, :, 0])
+        v[i] = np.maximum(v[i - 1] + kappa*(theta - v[i - 1]) * dt + sigma * np.sqrt(v[i - 1] * dt) * Z[i - 1, :, 1], 0)
+    
+    return S.T, v.T
 
 
 if __name__ == "__main__":

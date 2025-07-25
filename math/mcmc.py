@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Callable
 
+
 def posterior_grad(theta: np.ndarray, posterior: Callable, epsilon=1e-5):
     """Approximate the gradient of the posterior using finite differences."""
     grad = np.zeros_like(theta)
