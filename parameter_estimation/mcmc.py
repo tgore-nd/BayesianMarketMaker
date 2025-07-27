@@ -55,7 +55,7 @@ def leapfrog(U: Callable, theta: np.ndarray, p: np.ndarray, step_size: float, n_
     # Negate momentum to make proposal reversible
     return theta, -p
 
-def hmc_sample(initial_theta: np.ndarray, U: Callable, n_samples: int, step_size: float, n_steps: int, mass: float = 1.0) -> tuple[np.ndarray, float]:
+def hmc_sample(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable, n_samples: int, step_size: float, n_steps: int, mass: float = 1.0) -> tuple[np.ndarray, float]:
     """
     Run Hamiltonian Monte Carlo.
     
@@ -63,6 +63,8 @@ def hmc_sample(initial_theta: np.ndarray, U: Callable, n_samples: int, step_size
     ----------
     initial_theta : ndarray, shape (D,)
         Starting point for θ.
+    const_params : ndarray
+        Parameters that are not estimated but must be passed into U to ensure modularity.
     U : callable
         Potential energy function. U(theta) = -log p(theta) up to const.
     grad_U : callable
@@ -98,8 +100,8 @@ def hmc_sample(initial_theta: np.ndarray, U: Callable, n_samples: int, step_size
         theta_prop, p_prop = leapfrog(U, theta, p0, step_size, n_steps, inv_mass)
         
         # Metropolis acceptance test
-        current_H = U(theta) + 0.5 * np.sum(p0**2 * inv_mass)
-        prop_H = U(theta_prop) + 0.5 * np.sum(p_prop**2 * inv_mass)
+        current_H = U(*const_params, *theta) + 0.5 * np.sum(p0**2 * inv_mass) # For Heston model, const_params = [S, S0, r, tau], theta = [kappa, theta, sigma, rho, v0]
+        prop_H = U(*const_params, *theta_prop) + 0.5 * np.sum(p_prop**2 * inv_mass)
         delta_H = prop_H - current_H
         
         if np.random.rand() < np.exp(-delta_H):
@@ -113,23 +115,4 @@ def hmc_sample(initial_theta: np.ndarray, U: Callable, n_samples: int, step_size
 
 
 if __name__ == "__main__":
-    # Example: Sampling from a 1D standard normal N(0, 1)
-
-    # Potential U(θ) = θ^2/2, so grad_U = θ
-    def U_gauss(theta):
-        return 0.5 * np.dot(theta, theta)
-
-    # Run HMC
-    np.random.seed(42)
-    samples, rate = hmc_sample(
-        initial_theta=np.array([2.0]),
-        U=U_gauss,
-        n_samples=5000,
-        step_size=0.1,
-        n_steps=10,
-        mass=1.0
-    )
-
-    print(f"Acceptance rate: {rate:.3f}")
-    print("Sample mean:", samples.mean())
-    print("Sample variance:", samples.var(ddof=1))
+   pass

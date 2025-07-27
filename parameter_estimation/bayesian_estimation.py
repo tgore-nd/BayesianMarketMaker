@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.stats import gamma, invgamma, uniform
 from price_models.heston import heston_likelihood # the likelihood function
 
@@ -31,10 +30,10 @@ def prior(kappa: float, theta: float, sigma: float, rho: float, v0: float) -> fl
     return kappa_dist(kappa) * theta_dist(theta) * sigma_dist(sigma) * rho_dist(rho) * v0_dist(v0)
 
 
-def posterior(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float):
+def posterior(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
     return heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau) * prior(kappa, sigma, theta, rho, v0)
 
 
-def U(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
+def U(S: float, S0: float, r: float, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float) -> float:
     """Evaluate the potential, the negative log of the posterior. This is used in Hamiltonian Monte Carlo."""
     return -np.log(heston_likelihood(S, kappa, theta, sigma, rho, v0, r, S0, tau) * prior(kappa, theta, sigma, rho, v0))
