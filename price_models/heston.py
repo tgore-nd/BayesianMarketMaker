@@ -1,9 +1,10 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.integrate import quad
 from typing import Callable
+from numba import njit
 
 
+@njit
 def heston_cf(phi: np.ndarray, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float) -> np.ndarray:
     """
     Heston characteristic function: returns E[exp(i * phi * ln(S_T))]
@@ -43,6 +44,12 @@ def heston_cf(phi: np.ndarray, tau: float, kappa: float, theta: float, sigma: fl
     return np.exp(C + D * v0 + i * phi * np.log(S0))
 
 
+@njit
+def heston_integrand(u, x, kappa, theta, sigma, rho, v0, r, S0, tau):
+    """Evaluate integrand at some log price x."""
+    return np.real(np.exp(-1j*u*x) * heston_cf(u, tau, kappa, theta, sigma, rho, v0, r, S0))
+
+
 def heston_likelihood(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
     """Find the likelihood of S in time tau at current price S0."""
     # Get log prices
@@ -51,20 +58,40 @@ def heston_likelihood(S: float, kappa: float, theta: float, sigma: float, rho: f
         return 0
     
     x = np.log(S)
-
-    # Get integrand
-    def integrand(u, x, kappa, theta, sigma, rho, v0, r, S0, tau):
-        """Evaluate integrand at some log price x."""
-        return np.real(np.exp(-1j*u*x) * heston_cf(u, tau, kappa, theta, sigma, rho, v0, r, S0))
     
     # Perform inverse Fourier transform to get the PDF of x
-    val, _ = quad(lambda u: integrand(u, x, kappa, theta, sigma, rho, v0, r, S0, tau),
+    val, _ = quad(lambda u: heston_integrand(u, x, kappa, theta, sigma, rho, v0, r, S0, tau),
                   -np.inf, np.inf, # bounds
                   )
     
     val /= (2 * np.pi)
-
+    if abs(val) == np.inf: print("Error!")
     # Switch to the PDF of S
+    return val / S
+
+
+@njit
+def heston_likelihood_compiled(S: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
+    """Find the likelihood of S in time tau at current price S0."""
+    # Get log prices
+    if S == 0:
+        # Asymptotically, the likelihood will be zero here (look at the graph to confirm)
+        return 0
+    
+    x = np.log(S)
+
+    # Numerical integration via trapezoidal rule
+    N = 2000
+    L = 100  # limit of integration
+    u_vals = np.linspace(-L, L, N)
+    du = u_vals[1] - u_vals[0]
+
+    total = 0.0
+    for i in range(N):
+        weight = 0.5 if i == 0 or i == N - 1 else 1.0
+        total += weight * heston_integrand(u_vals[i], x, kappa, theta, sigma, rho, v0, r, S0, tau)
+    
+    val = du * total / (2 * np.pi)
     return val / S
 
 
@@ -149,6 +176,4 @@ if __name__ == "__main__":
 
     K = np.arange(0, 100)
 
-    for k_i in K:
-        print(k_i, price_prob(heston_cf, tau, kappa, theta, sigma, rho, v0, r, S0, k_i) - likelihood_prob(k_i, kappa, theta, sigma, rho, v0, r, S0, tau)) # type: ignore
-        # Overestimate: negative, underestimate: positive; imprecision is probably just due to using multiple integral approximation methods
+    print(heston_likelihood(102, kappa, theta, sigma, rho, v0, r, S0, tau))

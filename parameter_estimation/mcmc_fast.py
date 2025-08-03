@@ -1,24 +1,26 @@
 import numpy as np
 import arviz as az
-import bayesian_estimation
+import bayesian_estimation_fast as bayesian_estimation
 import time
 from typing import Callable
 from multiprocessing import Pool
+from numba import njit
 
 
-def posterior_grad(theta: np.ndarray, const_params: np.ndarray, posterior: Callable, epsilon=1e-5):
+@njit
+def heston_posterior_grad(theta: np.ndarray, const_params: np.ndarray, epsilon=1e-5):
     """Approximate the gradient of the posterior using finite differences."""
-    grad = np.zeros_like(theta)
+    grad = np.zeros_like(theta, dtype=np.float64)
     for i in range(len(theta)):
-        dtheta = np.zeros_like(theta)
+        dtheta = np.zeros_like(theta, dtype=np.float64)
         dtheta[i] = epsilon
-        grad[i] = (posterior(*const_params, *(theta + dtheta)) - posterior(*const_params, *(theta - dtheta))) / (2 * epsilon)
-        if np.any(np.isnan(grad[i])): print(f"Grad: {grad[i]}, params: {theta + dtheta}")
+        grad[i] = (bayesian_estimation.U_compiled(const_params, (theta + dtheta)) - bayesian_estimation.U_compiled(const_params, (theta - dtheta))) / (2 * epsilon)
 
     return grad
 
 
-def leapfrog(U: Callable, theta: np.ndarray, const_params: np.ndarray, p: np.ndarray, step_size: float, n_steps: int, inv_mass: float):
+@njit
+def leapfrog_compiled(theta: np.ndarray, const_params: np.ndarray, p: np.ndarray, step_size: float, n_steps: int, inv_mass: float):
     """
     Perform L steps of the leapfrog integrator.
     
@@ -43,7 +45,7 @@ def leapfrog(U: Callable, theta: np.ndarray, const_params: np.ndarray, p: np.nda
         The new position and (negated) momentum.
     """
     # Get gradient
-    grad_U = posterior_grad(theta, const_params, U)
+    grad_U = heston_posterior_grad(theta, const_params)
 
     # Half‑step momentum update
     p = p - 0.5 * step_size * grad_U
@@ -62,7 +64,8 @@ def leapfrog(U: Callable, theta: np.ndarray, const_params: np.ndarray, p: np.nda
     return theta, -p
 
 
-def hmc_sample(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable, n_samples: int, step_size: float, n_steps: int, mass: float = 1.0) -> tuple[np.ndarray, float]:
+@njit
+def hmc_sample_fast(initial_theta: np.ndarray, const_params: np.ndarray, n_samples: int, step_size: float, n_steps: int, mass: float = 1.0) -> tuple[np.ndarray, float]:
     """
     Run Hamiltonian Monte Carlo.
     
@@ -92,24 +95,23 @@ def hmc_sample(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable,
     accept_rate : float
         Proportion of proposals accepted.
     """
-    theta = np.array(initial_theta, dtype=np.float64)
+    theta = initial_theta
     inv_mass = 1.0 / mass
     D = theta.shape[0]
     
-    samples = np.zeros((n_samples, D), np.float64)
+    samples = np.zeros((n_samples, D), dtype=np.float64)
     n_accept = 0
     
     for i in range(n_samples):
-        # print(f"Sample: {i}")
         # Sample auxiliary momentum
         p0 = np.random.normal(0, np.sqrt(mass), size=D)
         
         # Simulate Hamiltonian dynamics
-        theta_prop, p_prop = leapfrog(U, theta, const_params, p0, step_size, n_steps, inv_mass)
+        theta_prop, p_prop = leapfrog_compiled(theta, const_params, p0, step_size, n_steps, inv_mass)
         
         # Metropolis acceptance test
-        current_H = U(*const_params, *theta) + 0.5 * np.sum(p0**2 * inv_mass) # For Heston model, const_params = [S, S0, r, tau], theta = [kappa, theta, sigma, rho, v0]
-        prop_H = U(*const_params, *theta_prop) + 0.5 * np.sum(p_prop**2 * inv_mass)
+        current_H = bayesian_estimation.U_compiled(const_params, theta) + 0.5 * np.sum(p0**2 * inv_mass) # For Heston model, const_params = [S, S0, r, tau], theta = [kappa, theta, sigma, rho, v0]
+        prop_H = bayesian_estimation.U_compiled(const_params, theta_prop) + 0.5 * np.sum(p_prop**2 * inv_mass)
         delta_H = prop_H - current_H
         
         if np.random.rand() < np.exp(-delta_H): # to increase acceptance rate, decrease step_size
@@ -148,17 +150,22 @@ def discard_burn_in(chains: list[np.ndarray], max_rhat: float = 1.01, min_retain
     return chains, 0
 
 
-def run_hmc(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable, num_chains: int, n_samples: int = 3000, step_size: float = 0.001, n_steps: int = 5, mass: float = 1.0):
+def run_hmc(initial_theta: np.ndarray, const_params: np.ndarray, num_chains: int, n_samples: int = 3000, step_size: float = 0.001, n_steps: int = 5, mass: float = 1.0):
     jittered_thetas = np.random.normal(scale = 0.01, size = (num_chains, len(initial_theta))) + initial_theta
 
     # Get several chains at once
     start = time.perf_counter()
     with Pool(num_chains) as pool:
-        results = pool.starmap(hmc_sample, [(jittered_theta, const_params, U, n_samples, step_size, n_steps, 1.0) for jittered_theta in jittered_thetas])
+        results = pool.starmap(hmc_sample_fast, [(jittered_theta, const_params, n_samples, step_size, n_steps, 1.0) for jittered_theta in jittered_thetas])
     chains, accept_rates = zip(*results)
     print(accept_rates)
     end = time.perf_counter()
-    print(f"Normal: {end - start} seconds")
+    print(f"Compiled: {end - start} seconds")
+
+    #chains, accept_rates = zip(*[hmc_sample(jittered_theta, const_params, U = U, n_samples=n_samples, step_size=step_size, n_steps=n_steps) for jittered_theta in jittered_thetas])
+    
+    # chains, burnin = discard_burn_in(list(chains))
+    # print(burnin)
 
 
 if __name__ == "__main__":
@@ -175,4 +182,4 @@ if __name__ == "__main__":
     initial_theta = np.array([kappa, theta, sigma, rho, v0], dtype=np.float64)
     const_params = np.array([S, S0, r, tau], dtype=np.float64)
     
-    run_hmc(initial_theta, const_params, bayesian_estimation.U, num_chains = 5)
+    run_hmc(initial_theta, const_params, num_chains = 5)
