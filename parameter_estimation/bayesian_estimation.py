@@ -17,7 +17,7 @@ def prior(kappa: float, theta: float, sigma: float, rho: float, v0: float) -> fl
         """Get the distribution for sigma, the volatility of variance."""
         return invgamma.pdf(sigma, a=shape, scale=scale)
     
-    def rho_dist(rho: float, loc: float = -1., scale: float = 2.):
+    def rho_dist(rho: float, loc: float = -1., scale: float = 1.):
         """Get the distribution for rho, the correlation between price and variance.
         
         Defined on [loc, loc + scale]."""

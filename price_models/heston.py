@@ -92,7 +92,7 @@ def heston_likelihood_compiled(S: float, kappa: float, theta: float, sigma: floa
         total += weight * heston_integrand(u_vals[i], x, kappa, theta, sigma, rho, v0, r, S0, tau)
     
     val = du * total / (2 * np.pi)
-    return val / S
+    return np.maximum(val / S, 1e-12)
 
 
 def likelihood_prob(K, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float, tau: float) -> float:
