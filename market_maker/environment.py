@@ -1,37 +1,47 @@
 import duckdb
 import numpy as np
 import torch
+import polars as pl
+from datetime import datetime
+from price_models.heston import generate_sample_paths
+from parameter_estimation.mcmc_fast import hmc_sample_fast
+
 
 class MarketEnvironment:
     """The true trading environment."""
-    def __init__(self, ticker: str, deltalake_directory: str):
+    def __init__(self, ticker: str, deltalake_directory: str, start_date: str, initial_theta: np.ndarray):
         self.ticker = ticker.upper()
         self.deltalake_directory = deltalake_directory
+        self.start_date = datetime.strptime(start_date, "%m/%d/%Y")
 
         # Import associated price data
         self.data = duckdb.sql(f"SELECT * FROM delta_scan('{deltalake_directory}') WHERE Ticker = '{ticker}' ORDER BY timestamp")
 
         # Baseline parameters
-        self.reset(return_state=False)
+        self.reset(initial_theta, return_state=False)
 
-    def reset(self, return_state=True) -> torch.Tensor | None:
+    def reset(self, initial_theta: np.ndarray, return_state=True) -> torch.Tensor | None:
         """Reset the environment and optionally return the initial state."""
         self.current_step: int = 0
         self.model_total_cash: float = 0.0
         self.model_total_inv: int = 0
-        self.prices = self.data.select("open, high, low, close, volume").limit(n=1, offset=self.current_step).pl()
+        self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
+        self.interest_rates = pl.read_csv("./data/DGS3MO.csv", schema={"observation_date": pl.Datetime, "DGS3MO": pl.Float64}, null_values="").filter(pl.col("observation_date") >= self.start_date)
         # Unfortunately, I only have access to OHLCV data. This could be way more nuanced with L1 or L2 data.
+
+        # Set Heston params
+        self.current_theta = initial_theta
         
         # Tracking variables (not returned, but used in state computation later)
         self.mid_prices = [(self.prices["high"][0] + self.prices["low"][0]) / 2]
-        self.inv_count = [0]
-        self.dynamic_thresholds = [1]
-        self.pnl = [0]
-        self.profit = [0]
+        self.inv_count: list = [0]
+        self.dynamic_thresholds: list = [1]
+        self.pnl: list = [0]
+        self.profit: list = [0]
 
         # Environment state variables
         mid_prices_change = self.mid_prices[0]
-        self.prices = self.data.select("open, high, low, close, volume").limit(n=1, offset=self.current_step).pl()
+        self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
 
         # Model state variables
         self.model_total_cash: float = 0.0 # profit attributed to change in stock price
@@ -43,75 +53,45 @@ class MarketEnvironment:
 
         env_state = torch.concat([self.prices.to_torch().ravel(), torch.tensor([mid_prices_change])], dim=0)
         model_state = torch.tensor([self.model_total_cash, self.model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
-        self.state = torch.stack([env_state, model_state])
+        self.state = torch.hstack([env_state, model_state])
+
         if return_state:
             return self.state
+    
+    def reset_simulation(self) -> None:
+        """Reset the simulation to build off the current actual values."""
+        # Use current arrays as starting values
+        self.simulated_profit: list = self.profit
+        self.simulated_inv_count: list = self.inv_count
+        self.simulated_dynamic_thresholds: list = self.dynamic_thresholds
+        self.simulated_pnl: list = self.pnl
+        self.simulated_prev_close: float = self.prev_prices["close"][0]
+        self.simulated_mid_prices: list = self.mid_prices
+        self.current_simulated_theta: np.ndarray = self.current_theta
+
+        self.simulation_start_index = len(self.simulated_profit)
 
     def step(self, action: torch.Tensor, AIIF: float) -> tuple[torch.Tensor, float]:
         """Given an action in the MarketEnvironment, return the next OHLCV array in self.data and the model's total inventory and profit.
         
         The model observes state 0 and places trades to be filled in state 1. The state then updates, and `step()` determines what happens."""
-        # Fetch action
-        buy_limit_order, sell_limit_order, num_stocks_market = action
-        buy_limit_price, buy_limit_num = buy_limit_order
-        sell_limit_price, sell_limit_num = sell_limit_order
-
+        # Fetch action [buy_limit_price, buy_limit_num, sell_limit_price, sell_limit_num, num_stocks_market]
         # Advance prices to next state
-        self.current_step += 1
         self.prev_prices = self.prices
-        self.prices = self.data.select("open, high, low, close, volume").limit(n=1, offset=self.current_step).pl()
 
-        # Reset individual params
-        num_stocks_bought = 0
-        num_stocks_sold = 0
-        current_profit = 0
-        hedging_penalty = 0
-
-        # Evaluate next state given the action
-        close_price = self.prices["close"][0] # the price at the end of the timestep during which the order is active
+        self.current_step += 1
+        self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
+        close_price = self.prices["close"][0]
         high_price = self.prices["high"][0]
         low_price = self.prices["low"][0]
-        spread_estimate = high_price - low_price
         mid_price = (high_price + low_price) / 2
-        fee_per_stock = 0.005
 
-        # Execute orders
-        # Limit orders
-        buy_cost = (np.random.uniform(low_price, close_price) + fee_per_stock) * buy_limit_num
-        if buy_limit_num > 0 and low_price <= buy_limit_price and self.model_total_cash - buy_cost >= 0:
-            # Buy order (trade executes at a price in [low_price, next_price])
-            self.model_total_cash -= buy_cost
-            current_profit -= buy_cost
-            self.model_total_inv += int(buy_limit_num)
-            num_stocks_bought += int(buy_limit_num)
-        elif sell_limit_num > 0 and high_price >= sell_limit_price and self.model_total_inv - sell_limit_num >= 0:
-            # Sell order (trade executes at a price in [next_price, high_price])
-            sell_price = (np.random.uniform(close_price, high_price) - fee_per_stock) * sell_limit_num
-            self.model_total_cash += sell_price
-            current_profit += sell_price
-            self.model_total_inv -= int(sell_limit_num)
-            num_stocks_sold += int(sell_limit_num)
-        
-        # Market orders -- model pays the bid-ask spread
-        market_price = np.random.uniform(mid_price - spread_estimate / 2, mid_price + spread_estimate / 2)
-        if num_stocks_market > 0 and self.model_total_cash - market_price >= 0:
-            # Buy order
-            hedging_penalty = spread_estimate * num_stocks_market
-            self.model_total_cash -= (market_price + hedging_penalty) * num_stocks_market
-            current_profit -= market_price + hedging_penalty
-            self.model_total_inv += int(num_stocks_market)
-            num_stocks_bought += int(num_stocks_market)
-        elif num_stocks_market < 0 and self.model_total_inv - abs(num_stocks_market) >= 0:
-            # Sell order
-            hedging_penalty = spread_estimate * abs(num_stocks_market)
-            self.model_total_cash += (market_price - hedging_penalty) * abs(num_stocks_market)
-            current_profit += market_price - hedging_penalty
-            self.model_total_inv -= int(abs(num_stocks_market))
-            num_stocks_sold += int(abs(num_stocks_market))
+        # Conduct orders
+        num_stocks_bought, num_stocks_sold, current_profit, hedging_penalty, self.model_total_cash, self.model_total_inv = self._order_fill(action, self.state)
 
         # Penalty function
         # Update the inventory and dynamic threshold arrays
-        DITF = self.model_total_cash / (self.model_total_inv * close_price)
+        DITF = 0 if self.model_total_inv == 0 else self.model_total_cash / (self.model_total_inv * close_price)
         inv_penalty = AIIF * min(1, float(np.mean(self.inv_count) / np.mean(self.dynamic_thresholds)))
 
         # Appends
@@ -130,17 +110,129 @@ class MarketEnvironment:
 
         env_state = torch.concat([self.prices.to_torch().ravel(), torch.tensor([mid_prices_change])], dim=0)
         model_state = torch.tensor([self.model_total_cash, self.model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
-        self.state = torch.stack([env_state, model_state])
+        self.state = torch.hstack([env_state, model_state])
 
-        return self.state, reward # add model attributes: inventory, total cash, last quoted spread, estimated market spread
+        # state = [open, high, low, close, mid_prices_change, total_cash, total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl]
+        return self.state, float(reward) # add model attributes: inventory, total cash, last quoted spread, estimated market spread
+    
+    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int = 0):
+        """Given some action devised by the model at some given state, predict the value of the reward function. Make sure you run `reset_simulation()` first!"""
+        # Get parameters (initial parameter is the previous value, current value is the current timestep)
+        tau = 1 / 525600
+        S0 = simulated_state[0].item()
+        S = simulated_state[3].item()
+        r = self.interest_rates["DGS3MO"][self.simulation_start_index + horizon_timestep]
+
+        # Sample parameters using observations from the previous minute
+        const_params = np.array([S, S0, r, tau])
+        results, accept_rate = hmc_sample_fast(self.current_simulated_theta, const_params, n_samples=10000, step_size=0.0001, n_steps=100)
+
+        # Remove the first 7500 samples as burn-in and compute average params
+        filtered_results = results[7500:, :] # chains tend to converge after ~7500 iterations of burn-in
+        kappa, theta, sigma, rho, v0 = np.mean(filtered_results, axis=0)
+        
+        # Get expected path over the next minute
+        expected_path = np.mean(generate_sample_paths(tau, kappa, theta, sigma, rho, v0, S, r, 1000, 100)[0], axis=0)
+        open_price = expected_path[0]
+        close_price = expected_path[-1]
+        high_price = np.max(expected_path)
+        low_price = np.min(expected_path)
+        mid_price = (high_price + low_price) / 2
+
+        # Evaluate actions
+        num_stocks_bought, num_stocks_sold, current_profit, hedging_penalty, model_total_cash, model_total_inv = self._order_fill(action, simulated_state)
+
+        # Penalty function
+        # Update the inventory and dynamic threshold arrays
+        DITF = model_total_cash / (model_total_inv * close_price)
+        inv_penalty = AIIF * min(1, float(np.mean(self.simulated_inv_count) / np.mean(self.simulated_dynamic_thresholds)))
+
+        # Appends
+        self.simulated_mid_prices.append(mid_price)
+        self.simulated_profit.append(current_profit)
+        self.simulated_inv_count.append(model_total_inv)
+        self.simulated_dynamic_thresholds.append(DITF * abs(model_total_cash / np.mean(self.simulated_mid_prices)))
+        self.simulated_pnl.append(model_total_inv * (close_price - self.simulated_prev_close)) # evaluate price change effect on current inventory (pnl)
+
+        # Evaluate reward given action
+        reward = current_profit + self.simulated_pnl[-1] - hedging_penalty - inv_penalty
+
+        # Return the next state of the system and the reward
+        mid_prices_change = self.simulated_mid_prices[-1] - self.simulated_mid_prices[-2]
+        current_pnl = model_total_inv * (S - S0)
+
+        # Update current params
+        self.simulated_prev_close = close_price
+        self.current_simulated_theta = np.array([kappa, theta, sigma, rho, v0])
+
+        env_state = torch.tensor([open_price, high_price, low_price, close_price, mid_prices_change])
+        model_state = torch.tensor([model_total_cash, model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
+        new_simulated_state = torch.hstack([env_state, model_state])
+
+        return new_simulated_state, reward.item() # add model attributes: inventory, total cash, last quoted spread, estimated market spread
+    
+    @staticmethod
+    def _order_fill(action: torch.Tensor, state: torch.Tensor) -> tuple[float, float, float, float, float, int]:
+        # Action
+        buy_limit_price, buy_limit_num, sell_limit_price, sell_limit_num, num_stocks_market = action
+
+        # State
+        open_price, high_price, low_price, close_price = state.tolist()[:4]
+        mid_prices_change, model_total_cash, model_total_inv, num_stocks_bought, num_stocks_sold, current_profit = state.tolist()[5:]
+        spread_estimate = high_price - low_price
+        mid_price = (high_price + low_price) / 2
+        fee_per_stock = 0.005
+
+        # Reset individual params
+        num_stocks_bought = 0
+        num_stocks_sold = 0
+        current_profit = 0
+        hedging_penalty = 0
+
+        # Execute orders
+        # Limit orders
+        buy_cost = (np.random.uniform(low_price, close_price) + fee_per_stock) * buy_limit_num
+        if buy_limit_num > 0 and low_price <= buy_limit_price and model_total_cash - buy_cost >= 0:
+            # Buy order (trade executes at a price in [low_price, next_price])
+            model_total_cash -= buy_cost
+            current_profit -= buy_cost
+            model_total_inv += int(buy_limit_num)
+            num_stocks_bought += int(buy_limit_num)
+        elif sell_limit_num > 0 and high_price >= sell_limit_price and model_total_inv - sell_limit_num >= 0:
+            # Sell order (trade executes at a price in [next_price, high_price])
+            sell_price = (np.random.uniform(close_price, high_price) - fee_per_stock) * sell_limit_num
+            model_total_cash += sell_price
+            current_profit += sell_price
+            model_total_inv -= int(sell_limit_num)
+            num_stocks_sold += int(sell_limit_num)
+        
+        # Market orders -- model pays the bid-ask spread
+        market_price = np.random.uniform(mid_price - spread_estimate / 2, mid_price + spread_estimate / 2)
+        if num_stocks_market > 0 and model_total_cash - market_price >= 0:
+            # Buy order
+            hedging_penalty = spread_estimate * num_stocks_market
+            model_total_cash -= (market_price + hedging_penalty) * num_stocks_market
+            current_profit -= market_price + hedging_penalty
+            model_total_inv += int(num_stocks_market)
+            num_stocks_bought += int(num_stocks_market)
+        elif num_stocks_market < 0 and model_total_inv - abs(num_stocks_market) >= 0:
+            # Sell order
+            hedging_penalty = spread_estimate * abs(num_stocks_market)
+            model_total_cash += (market_price - hedging_penalty) * abs(num_stocks_market)
+            current_profit += market_price - hedging_penalty
+            model_total_inv -= int(abs(num_stocks_market))
+            num_stocks_sold += int(abs(num_stocks_market))
+        
+        return num_stocks_bought, num_stocks_sold, current_profit, hedging_penalty, model_total_cash, model_total_inv
 
 
-# Examples
-env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake")
-limit_order = {"price": 0.3, "num_units": 5} # sell takes same form, but negative num_units
-limit_order = torch.tensor([0.3, 5])
-
-hedge_market_order = {"num_units_buy": 5, "num_units_sell": 0}
-hedge_market_order = torch.tensor([5, 0])
-
-# may have to change this into PyTorch tensor form later on
+if __name__ == "__main__":
+    # Examples
+    kappa = 2.0
+    theta = 0.04
+    sigma = 0.3
+    rho = -0.7
+    v0 = 0.04
+    initial_theta = np.array([kappa, theta, sigma, rho, v0])
+    env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "1/1/2004", initial_theta)
+    print("Done")
