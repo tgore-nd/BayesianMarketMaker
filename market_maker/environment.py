@@ -12,19 +12,20 @@ class MarketEnvironment:
     def __init__(self, ticker: str, deltalake_directory: str, start_date: str, initial_theta: np.ndarray):
         self.ticker = ticker.upper()
         self.deltalake_directory = deltalake_directory
-        self.start_date = datetime.strptime(start_date, "%m/%d/%Y")
+        self.start_date = datetime.strptime(start_date, "%Y-%m-%d")
 
         # Import associated price data
-        self.data = duckdb.sql(f"SELECT * FROM delta_scan('{deltalake_directory}') WHERE Ticker = '{ticker}' ORDER BY timestamp")
+        self.data = duckdb.sql(f"SELECT * FROM delta_scan('{deltalake_directory}') WHERE Ticker = '{ticker}' AND STRPTIME(timestamp, '%Y-%m-%d %H:%M:%S') >= STRPTIME('{start_date}', '%Y-%m-%d') ORDER BY timestamp")
+        # self.data = duckdb.
 
         # Baseline parameters
-        self.reset(initial_theta, return_state=False)
+        self.reset(initial_theta)
 
-    def reset(self, initial_theta: np.ndarray, return_state=True) -> torch.Tensor | None:
+    def reset(self, initial_theta: np.ndarray) -> torch.Tensor:
         """Reset the environment and optionally return the initial state."""
         self.current_step: int = 0
-        self.model_total_cash: float = 0.0
-        self.model_total_inv: int = 0
+        self.model_total_cash: float = 100.0
+        self.model_total_inv: int = 10
         self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
         self.interest_rates = pl.read_csv("./data/DGS3MO.csv", schema={"observation_date": pl.Datetime, "DGS3MO": pl.Float64}, null_values="").filter(pl.col("observation_date") >= self.start_date)
         # Unfortunately, I only have access to OHLCV data. This could be way more nuanced with L1 or L2 data.
@@ -55,8 +56,7 @@ class MarketEnvironment:
         model_state = torch.tensor([self.model_total_cash, self.model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
         self.state = torch.hstack([env_state, model_state])
 
-        if return_state:
-            return self.state
+        return self.state
     
     def reset_simulation(self) -> None:
         """Reset the simulation to build off the current actual values."""
@@ -174,7 +174,7 @@ class MarketEnvironment:
     @staticmethod
     def _order_fill(action: torch.Tensor, state: torch.Tensor) -> tuple[float, float, float, float, float, int]:
         # Action
-        buy_limit_price, buy_limit_num, sell_limit_price, sell_limit_num, num_stocks_market = action
+        buy_limit_price, buy_limit_num, sell_limit_price, sell_limit_num, num_stocks_market = action.tolist()
 
         # State
         open_price, high_price, low_price, close_price = state.tolist()[:4]
@@ -234,5 +234,5 @@ if __name__ == "__main__":
     rho = -0.7
     v0 = 0.04
     initial_theta = np.array([kappa, theta, sigma, rho, v0])
-    env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "1/1/2004", initial_theta)
+    env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "2010-01-01", initial_theta)
     print("Done")
