@@ -23,11 +23,12 @@ class MarketEnvironment:
 
     def reset(self, initial_theta: np.ndarray) -> torch.Tensor:
         """Reset the environment and optionally return the initial state."""
-        self.current_step: int = 0
+        self.current_step: int = 1
         self.horizon_timestep = 0
         self.model_total_cash: float = 100.0
         self.model_total_inv: int = 10
         self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
+        self.prev_prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step - 1).pl()
         self.interest_rates = pl.read_csv("./data/DGS3MO.csv", schema={"observation_date": pl.Datetime, "DGS3MO": pl.Float64}, null_values="").filter(pl.col("observation_date") >= self.start_date)
         # Unfortunately, I only have access to OHLCV data. This could be way more nuanced with L1 or L2 data.
 
@@ -46,8 +47,6 @@ class MarketEnvironment:
         self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
 
         # Model state variables
-        self.model_total_cash: float = 0.0 # profit attributed to change in stock price
-        self.model_total_inv: int = 0
         num_stocks_bought: int = 0 # num stocks bought in the interval
         num_stocks_sold: int = 0 # num stocks sold in the interval
         current_profit: float = 0.0 # the profit recieved from buying/selling in a given time step
@@ -126,7 +125,7 @@ class MarketEnvironment:
         # state = [open, high, low, close, mid_prices_change, total_cash, total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl]
         return self.state, float(reward) # add model attributes: inventory, total cash, last quoted spread, estimated market spread
     
-    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int) -> tuple[torch.Tensor, float]:
+    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int, step_forward: bool = False, params: np.ndarray | None = None) -> tuple[torch.Tensor, float, np.ndarray]:
         """Given some action devised by the model at some given state, predict the value of the reward function. Make sure you run `reset_simulation()` first!"""
         # Get parameters (initial parameter is the previous value, current value is the current timestep)
         tau = 1 / 525600
@@ -134,13 +133,18 @@ class MarketEnvironment:
         S = simulated_state[3].item()
         r = self.interest_rates["DGS3MO"][self.simulation_start_index + horizon_timestep]
 
-        # Sample parameters using observations from the previous minute
-        const_params = np.array([S, S0, r, tau])
-        results, accept_rate = hmc_sample_fast(self.current_simulated_theta, const_params, n_samples=10000, step_size=0.0001, n_steps=100)
+        if step_forward: assert horizon_timestep == 0
 
-        # Remove the first 7500 samples as burn-in and compute average params
-        filtered_results = results[7500:, :] # chains tend to converge after ~7500 iterations of burn-in
-        kappa, theta, sigma, rho, v0 = np.mean(filtered_results, axis=0)
+        if params is None:
+            # Sample parameters using observations from the previous minute
+            const_params = np.array([S, S0, r, tau])
+            results, accept_rate = hmc_sample_fast(self.current_simulated_theta, const_params, n_samples=10000, step_size=0.0001, n_steps=100)
+
+            # Remove the first 7500 samples as burn-in and compute average params
+            filtered_results = results[7500:, :] # chains tend to converge after ~7500 iterations of burn-in
+            kappa, theta, sigma, rho, v0 = np.mean(filtered_results, axis=0)
+        else:
+            kappa, theta, sigma, rho, v0 = params
         
         # Get expected path over the next minute
         expected_path = np.mean(generate_sample_paths(tau, kappa, theta, sigma, rho, v0, S, r, 1000, 100)[0], axis=0)
@@ -158,12 +162,16 @@ class MarketEnvironment:
         DITF = model_total_cash / (model_total_inv * close_price)
         inv_penalty = AIIF * min(1, float(np.mean(self.simulated_inv_count) / np.mean(self.simulated_dynamic_thresholds)))
 
-        # Appends
-        self.simulated_mid_prices.append(mid_price)
-        self.simulated_profit.append(current_profit)
-        self.simulated_inv_count.append(model_total_inv)
-        self.simulated_dynamic_thresholds.append(DITF * abs(model_total_cash / np.mean(self.simulated_mid_prices)))
-        self.simulated_pnl.append(model_total_inv * (close_price - self.simulated_prev_close)) # evaluate price change effect on current inventory (pnl)
+        if step_forward:
+            # Appends
+            self.simulated_mid_prices.append(mid_price)
+            self.simulated_profit.append(current_profit)
+            self.simulated_inv_count.append(model_total_inv)
+            self.simulated_dynamic_thresholds.append(DITF * abs(model_total_cash / np.mean(self.simulated_mid_prices)))
+            self.simulated_pnl.append(model_total_inv * (close_price - self.simulated_prev_close)) # evaluate price change effect on current inventory (pnl)
+            
+            # Step forward
+            self.horizon_timestep += 1
 
         # Evaluate reward given action
         reward = current_profit + self.simulated_pnl[-1] - hedging_penalty - inv_penalty
@@ -180,18 +188,20 @@ class MarketEnvironment:
         model_state = torch.tensor([model_total_cash, model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
         new_simulated_state = torch.hstack([env_state, model_state])
 
-        self.horizon_timestep += 1
-
-        return new_simulated_state, reward.item() # add model attributes: inventory, total cash, last quoted spread, estimated market spread
+        return new_simulated_state, reward, np.array([kappa, theta, sigma, rho, v0]) # add model attributes: inventory, total cash, last quoted spread, estimated market spread
     
     @staticmethod
     def _order_fill(action: torch.Tensor, state: torch.Tensor) -> tuple[float, float, float, float, float, int]:
         # Action
         buy_limit_price, buy_limit_num, sell_limit_price, sell_limit_num, num_stocks_market = action.tolist()
+        buy_limit_num = int(buy_limit_num)
+        sell_limit_num = int(sell_limit_num)
+        num_stocks_market = int(num_stocks_market)
+        # num_stocks_market = 0
 
         # State
         open_price, high_price, low_price, close_price = state.tolist()[:4]
-        mid_prices_change, model_total_cash, model_total_inv, num_stocks_bought, num_stocks_sold, current_profit = state.tolist()[5:]
+        mid_prices_change, model_total_cash, model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl = state.tolist()[4:]
         spread_estimate = high_price - low_price
         mid_price = (high_price + low_price) / 2
         fee_per_stock = 0.005
@@ -211,6 +221,7 @@ class MarketEnvironment:
             current_profit -= buy_cost
             model_total_inv += int(buy_limit_num)
             num_stocks_bought += int(buy_limit_num)
+            print(f"BUY LIMIT SATISFIED: Bought {num_stocks_bought} at {buy_cost / buy_limit_num} per share.")
         elif sell_limit_num > 0 and high_price >= sell_limit_price and model_total_inv - sell_limit_num >= 0:
             # Sell order (trade executes at a price in [next_price, high_price])
             sell_price = (np.random.uniform(close_price, high_price) - fee_per_stock) * sell_limit_num
@@ -218,6 +229,7 @@ class MarketEnvironment:
             current_profit += sell_price
             model_total_inv -= int(sell_limit_num)
             num_stocks_sold += int(sell_limit_num)
+            print(f"SELL LIMIT SATISFIED: Sold {abs(num_stocks_sold)} at {sell_price / sell_limit_num} per share.")
         
         # Market orders -- model pays the bid-ask spread
         market_price = np.random.uniform(mid_price - spread_estimate / 2, mid_price + spread_estimate / 2)
@@ -228,6 +240,7 @@ class MarketEnvironment:
             current_profit -= market_price + hedging_penalty
             model_total_inv += int(num_stocks_market)
             num_stocks_bought += int(num_stocks_market)
+            print(f"BUY MARKET SATISFIED: Bought {num_stocks_market} at {market_price}.")
         elif num_stocks_market < 0 and model_total_inv - abs(num_stocks_market) >= 0:
             # Sell order
             hedging_penalty = spread_estimate * abs(num_stocks_market)
@@ -235,7 +248,9 @@ class MarketEnvironment:
             current_profit += market_price - hedging_penalty
             model_total_inv -= int(abs(num_stocks_market))
             num_stocks_sold += int(abs(num_stocks_market))
+            print(f"SELL MARKET SATISFIED: Sold {abs(num_stocks_market)} at {market_price}.")
         
+        print(f"Summary:\nStocks bought: {num_stocks_bought}\nStocks sold: {num_stocks_sold}\nCurrent profit: {current_profit}\nTotal cash: {model_total_cash}\nTotal inv: {model_total_inv}\nEstimated total value: {model_total_cash + model_total_inv * market_price}")
         return num_stocks_bought, num_stocks_sold, current_profit, hedging_penalty, model_total_cash, model_total_inv
 
 

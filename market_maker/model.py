@@ -8,6 +8,9 @@ from typing import Literal
 
 
 AIIF = 0.5
+INV_LIMIT = 10
+PRICE_LIMIT = 0.005
+# torch.autograd.set_detect_anomaly(True)
 
 
 class ReplayBuffer:
@@ -51,28 +54,38 @@ def mlp(sizes: list[int], activation, output_activation) -> nn.Sequential:
 
 # Gaussian Policy network for action selection
 class GaussianPolicy(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: tuple[int, int] = (256,256), log_std_min: float = -20, log_std_max: float = 2):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: tuple[int, int] = (256, 256), log_std_min: float = -20, log_std_max: float = 2):
         super().__init__()
         self.net = mlp([obs_dim]+list(hidden), activation=nn.ReLU, output_activation=nn.ReLU)
         self.mu = nn.Linear(hidden[-1], act_dim)
         self.log_std = nn.Linear(hidden[-1], act_dim)
         self.log_std_min, self.log_std_max = log_std_min, log_std_max
+        self.lower_bounds = torch.tensor([-PRICE_LIMIT, 0, 0, 0, -INV_LIMIT])
+        self.upper_bounds = torch.tensor([0, INV_LIMIT, PRICE_LIMIT, INV_LIMIT, INV_LIMIT])
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, float, float]:
         x = self.net(obs)
         mu = self.mu(x)
         log_std = torch.clamp(self.log_std(x), self.log_std_min, self.log_std_max)
         std = torch.exp(log_std)
-        # reparameterize
+
+        # Reparameterize
         eps = torch.randn_like(mu)
         pre_tanh = mu + eps * std
         action = torch.tanh(pre_tanh)  # squashed to (-1, 1)
-        # log_prob with tanh correction:
+
+        # Log_prob with tanh correction:
         log_prob = -0.5 * ((eps)**2 + 2*log_std + np.log(2*np.pi))
         log_prob = log_prob.sum(dim=-1, keepdim=True)
-        # correction for tanh
+
+        # Correction for tanh
         log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
-        return action, log_prob, mu
+
+        # Rescale action
+        action_rescaled = self.lower_bounds + (0.5 * (action + 1.0)) * (self.upper_bounds - self.lower_bounds)
+        close_price_modification = torch.tensor([obs[0][3], 0, obs[0][3], 0, 0])
+
+        return action_rescaled + close_price_modification, log_prob, mu
 
 # Q Networks for the actors and critics
 class QNetwork(nn.Module):
@@ -85,7 +98,7 @@ class QNetwork(nn.Module):
 
 # SAC Agent
 class SACAgent:
-    def __init__(self, state_dim: int = 12, action_dim: int = 5, device: Literal["cpu", "cuda"] = "cpu"):
+    def __init__(self, state_dim: int = 11, action_dim: int = 5, device: Literal["cpu", "cuda"] = "cpu"):
         self.device = device
         self.actor = GaussianPolicy(state_dim, action_dim).to(device)
         self.q1 = QNetwork(state_dim, action_dim).to(device) # min of these two networks is used to stabilize learning
@@ -103,7 +116,7 @@ class SACAgent:
 
         self.alpha = 0.2  # entropy regularization parameter
         self.gamma = 0.99 # discount factor
-        self.rho = 0.995 # polyak; helps smooth target updates to stabilize learning; -> 1 means slower updates
+        self.rho = 0.995  # polyak; helps smooth target updates to stabilize learning; -> 1 means slower updates
 
     def select_action(self, state: torch.Tensor, deterministic: bool = False): # deterministic at testing time; uses mean
         s_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -120,16 +133,12 @@ class SACAgent:
         reward = batch['reward'].float().to(self.device)
         next_state = batch['next_state'].float().to(self.device)
 
-        # Actor Q Function
-        a_pi, logp_pi, _ = self.actor(current_state) # pick action
-        q1_pi = self.q1(current_state, a_pi) # grade action
-        q2_pi = self.q2(current_state, a_pi)
-        q_pi = torch.min(q1_pi, q2_pi)
-
         # Critic Q Function
         with torch.no_grad():
             # Generate an action for the next state
             next_action, logp_next_action, _ = self.actor(next_state)
+            next_action = next_action.detach()
+            logp_next_action = logp_next_action.detach()
 
             # Evaluate Q function of next_action in next_state
             q1_t = self.q1_target(next_state, next_action)
@@ -148,32 +157,46 @@ class SACAgent:
         self.q1_opt.zero_grad(); q1_loss.backward(); self.q1_opt.step()
         self.q2_opt.zero_grad(); q2_loss.backward(); self.q2_opt.step()
 
+        # Actor Q Function
+        a_pi, logp_pi, _ = self.actor(current_state) # pick action
+        q1_pi = self.q1(current_state, a_pi) # grade action
+        q2_pi = self.q2(current_state, a_pi)
+        q_pi = torch.min(q1_pi, q2_pi)
+
         # Actor Update
-        actor_loss: torch.Tensor = (self.alpha * logp_pi - q_pi).mean()
+        actor_loss = (self.alpha * logp_pi - q_pi).mean()
         self.actor_opt.zero_grad(); actor_loss.backward(); self.actor_opt.step()
 
         # Soft updates: theta_targ * rho + (1 - rho) * theta
-        for p, tp in zip(self.q1.parameters(), self.q1_target.parameters()):
-            tp.data.mul_(self.rho)
-            tp.data.add_((1 - self.rho) * p.data)
-        for p, tp in zip(self.q2.parameters(), self.q2_target.parameters()):
-            tp.data.mul_(self.rho)
-            tp.data.add_((1 - self.rho) * p.data)
+        with torch.no_grad():
+            for p, tp in zip(self.q1.parameters(), self.q1_target.parameters()):
+                tp.data.mul_(self.rho)
+                tp.data.add_((1 - self.rho) * p.data)
+            for p, tp in zip(self.q2.parameters(), self.q2_target.parameters()):
+                tp.data.mul_(self.rho)
+                tp.data.add_((1 - self.rho) * p.data)
 
 # Transition simulation
-def generate_simulated_transitions(env: MarketEnvironment, state: torch.Tensor, action: torch.Tensor, n_samples: int = 5):
+def generate_simulated_transitions(env: MarketEnvironment, initial_state: torch.Tensor, initial_action: torch.Tensor, n_samples: int = 1):
     """
     env: environment providing reward function `env.reward(s,a,s_next)` and done predicate or terminal check
     stochastic_model.sample_next_states(s, a, n_samples) -> np.array (n_samples, state_dim)
     Returns list of (s, a, r, s_next)
     """
-    # s_next_samples = stochastic_model.sample_next_states(s, action, n_samples)  # (n_samples, state_dim)
-    simulated_next_state, r = env.projected_step(action, state, AIIF, horizon_timestep=0)
-    return [(state, action, r, simulated_next_state)]
+    current_state = initial_state
+    current_action = initial_action
+    params = None
+    transitions = []
+    for i in range(n_samples):
+        print(f"Simulation #{i}...")
+        simulated_next_state, reward, params = env.projected_step(current_action, current_state, AIIF, horizon_timestep=0, step_forward=False, params=params)
+        transitions.append((current_state, current_action, reward, simulated_next_state))
+    
+    return transitions
 
 # Training loop
-def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int = 100000):
-    state_dim = 12
+def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int = 100000, plan: bool = True):
+    state_dim = 11
     action_dim = 5
     buffer = ReplayBuffer(200000, state_dim, action_dim)
     agent = SACAgent(state_dim, action_dim)
@@ -183,16 +206,36 @@ def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int
         action = agent.select_action(initial_state)
         next_state, reward = env.step(action, AIIF)
         buffer.add(initial_state, action, reward, next_state) # add transition to replay buffer
+        print(f"Initial state: {initial_state}")
+        print(f"Action: {action}")
+        print(f"Final state: {next_state}")
+        print(f"Reward: {reward}")
 
         # Dyna imagination: generate model-based transitions from the *real* (s,a)
-        imagined = generate_simulated_transitions(env, initial_state, action, n_samples=8)
-        for (s_i, a, r, s_f) in imagined:
-            buffer.add(s_i, a, r, s_f)
+        if plan:
+            imagined = generate_simulated_transitions(env, initial_state, action, n_samples=10)
+            for (s_i, a, r, s_f) in imagined:
+                buffer.add(s_i, a, r, s_f)
 
         # Train
-        if buffer.size > 1024:
+        if buffer.size > 1024: # 1024
+            print("Training now...")
             for _ in range(1):  # gradient steps per env step
                 batch = buffer.sample(256)
                 agent.update(batch)
+        
+        initial_state = next_state
 
     return agent
+
+if __name__ == "__main__":
+    kappa = 2.0
+    theta = 0.04
+    sigma = 0.3
+    rho = -0.7
+    v0 = 0.04
+    initial_theta = np.array([kappa, theta, sigma, rho, v0])
+    env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "2010-01-01", initial_theta)
+    print("Done")
+
+    train_loop(env, initial_theta, plan=False)
