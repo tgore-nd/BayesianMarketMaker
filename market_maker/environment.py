@@ -24,6 +24,7 @@ class MarketEnvironment:
     def reset(self, initial_theta: np.ndarray) -> torch.Tensor:
         """Reset the environment and optionally return the initial state."""
         self.current_step: int = 0
+        self.horizon_timestep = 0
         self.model_total_cash: float = 100.0
         self.model_total_inv: int = 10
         self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
@@ -35,7 +36,7 @@ class MarketEnvironment:
         
         # Tracking variables (not returned, but used in state computation later)
         self.mid_prices = [(self.prices["high"][0] + self.prices["low"][0]) / 2]
-        self.inv_count: list = [0]
+        self.inv_count: list = [self.model_total_inv]
         self.dynamic_thresholds: list = [1]
         self.pnl: list = [0]
         self.profit: list = [0]
@@ -52,6 +53,17 @@ class MarketEnvironment:
         current_profit: float = 0.0 # the profit recieved from buying/selling in a given time step
         current_pnl: float = 0.0 # profit attributed to change in stock price
 
+        # Reset simulation
+        self.simulated_profit: list = self.profit
+        self.simulated_inv_count: list = self.inv_count
+        self.simulated_dynamic_thresholds: list = self.dynamic_thresholds
+        self.simulated_pnl: list = self.pnl
+        self.simulated_prev_close: float = self.prev_prices["close"][0]
+        self.simulated_mid_prices: list = self.mid_prices
+        self.current_simulated_theta: np.ndarray = self.current_theta
+        self.simulation_start_index: int = len(self.simulated_profit)
+
+        # Return
         env_state = torch.concat([self.prices.to_torch().ravel(), torch.tensor([mid_prices_change])], dim=0)
         model_state = torch.tensor([self.model_total_cash, self.model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
         self.state = torch.hstack([env_state, model_state])
@@ -68,8 +80,7 @@ class MarketEnvironment:
         self.simulated_prev_close: float = self.prev_prices["close"][0]
         self.simulated_mid_prices: list = self.mid_prices
         self.current_simulated_theta: np.ndarray = self.current_theta
-
-        self.simulation_start_index = len(self.simulated_profit)
+        self.simulation_start_index: int = len(self.simulated_profit)
 
     def step(self, action: torch.Tensor, AIIF: float) -> tuple[torch.Tensor, float]:
         """Given an action in the MarketEnvironment, return the next OHLCV array in self.data and the model's total inventory and profit.
@@ -115,7 +126,7 @@ class MarketEnvironment:
         # state = [open, high, low, close, mid_prices_change, total_cash, total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl]
         return self.state, float(reward) # add model attributes: inventory, total cash, last quoted spread, estimated market spread
     
-    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int = 0):
+    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int) -> tuple[torch.Tensor, float]:
         """Given some action devised by the model at some given state, predict the value of the reward function. Make sure you run `reset_simulation()` first!"""
         # Get parameters (initial parameter is the previous value, current value is the current timestep)
         tau = 1 / 525600
@@ -168,6 +179,8 @@ class MarketEnvironment:
         env_state = torch.tensor([open_price, high_price, low_price, close_price, mid_prices_change])
         model_state = torch.tensor([model_total_cash, model_total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl])
         new_simulated_state = torch.hstack([env_state, model_state])
+
+        self.horizon_timestep += 1
 
         return new_simulated_state, reward.item() # add model attributes: inventory, total cash, last quoted spread, estimated market spread
     
@@ -236,3 +249,6 @@ if __name__ == "__main__":
     initial_theta = np.array([kappa, theta, sigma, rho, v0])
     env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "2010-01-01", initial_theta)
     print("Done")
+
+# Actor takes in current environment and determines best action
+# Critic estimates the value function, V(s), which represents the expected cumulative reward starting from state s
