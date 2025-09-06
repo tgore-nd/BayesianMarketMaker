@@ -13,7 +13,7 @@ def gamma_pdf_kappa(x, a=3., beta=1):
 
 
 @njit
-def half_normal_pdf_kappa(x, sigma=1, loc=2):
+def half_normal_pdf_kappa(x, sigma=0.5, loc=2.5):
     if x < 0:
         return 0.0
     coef = np.sqrt(2.0) / (sigma * np.sqrt(np.pi))
@@ -70,20 +70,18 @@ def prior_compiled(kappa: float, theta: float, sigma: float, rho: float, v0: flo
 @njit
 def U_compiled(const_params: np.ndarray, params: np.ndarray) -> float:
     """Evaluate the potential, the negative log of the posterior. This is used in Hamiltonian Monte Carlo."""
-    #S: float, S0: float, r: float, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float
     S, S0, r, tau = const_params
     kappa, theta, sigma, rho, v0 = params
-    #return heston_likelihood_compiled(S, kappa, theta, sigma, rho, v0, r, S0, tau) * prior_compiled(kappa, theta, sigma, rho, v0)
     return -(np.log(heston_likelihood_compiled(S, kappa, theta, sigma, rho, v0, r, S0, tau)) + np.log(prior_compiled(kappa, theta, sigma, rho, v0)))
 
 
 if __name__ == "__main__":
     S = np.linspace(1e-6, 200, 10000)
-    kappa = 2.0 # cannot be negative
-    theta = 0.04 # cannot be negative
-    sigma = 0.3 # cannot be negative
-    rho = -0.7 # cannot be positive
-    v0 = 0.04 # cannot be negative
+    kappa = 2.0
+    theta = 0.04
+    sigma = 0.3
+    rho = -0.7
+    v0 = 0.04
     r = 0.03
     S0 = 100
     tau = 1.0

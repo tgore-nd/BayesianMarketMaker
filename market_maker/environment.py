@@ -4,11 +4,11 @@ import torch
 import polars as pl
 from datetime import datetime
 from price_models.heston import generate_sample_paths
-from parameter_estimation.mcmc_fast import hmc_sample_fast
+from parameter_estimation.mcmc_fast import run_hmc
 
 
 class MarketEnvironment:
-    """The true trading environment."""
+    """The true trading environment. Pass in the directory to the delta lake containing the data, the start date for the algorithm, and an initial Heston parameter guess."""
     def __init__(self, ticker: str, deltalake_directory: str, start_date: str, initial_theta: np.ndarray):
         self.ticker = ticker.upper()
         self.deltalake_directory = deltalake_directory
@@ -16,13 +16,12 @@ class MarketEnvironment:
 
         # Import associated price data
         self.data = duckdb.sql(f"SELECT * FROM delta_scan('{deltalake_directory}') WHERE Ticker = '{ticker}' AND STRPTIME(timestamp, '%Y-%m-%d %H:%M:%S') >= STRPTIME('{start_date}', '%Y-%m-%d') ORDER BY timestamp")
-        # self.data = duckdb.
 
         # Baseline parameters
         self.reset(initial_theta)
 
     def reset(self, initial_theta: np.ndarray) -> torch.Tensor:
-        """Reset the environment and optionally return the initial state."""
+        """Reset the environment and return the initial state."""
         self.current_step: int = 1
         self.horizon_timestep = 0
         self.model_total_cash: float = 100.0
@@ -125,8 +124,10 @@ class MarketEnvironment:
         # state = [open, high, low, close, mid_prices_change, total_cash, total_inv, num_stocks_bought, num_stocks_sold, current_profit, current_pnl]
         return self.state, float(reward) # add model attributes: inventory, total cash, last quoted spread, estimated market spread
     
-    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int, step_forward: bool = False, params: np.ndarray | None = None) -> tuple[torch.Tensor, float, np.ndarray]:
-        """Given some action devised by the model at some given state, predict the value of the reward function. Make sure you run `reset_simulation()` first!"""
+    def projected_step(self, action: torch.Tensor, simulated_state: torch.Tensor, AIIF: float, horizon_timestep: int, step_forward: bool = False, params: np.ndarray | None = None, num_hmc_chains: int = 10) -> tuple[torch.Tensor, float, np.ndarray]:
+        """Given some action devised by the model at some given state, predict the value of the reward function. Make sure you run `reset_simulation()` first!
+        
+        This is helpful in providing the model more examples upon which to train, as interacting with the environment itself can be expensive."""
         # Get parameters (initial parameter is the previous value, current value is the current timestep)
         tau = 1 / 525600
         S0 = simulated_state[0].item()
@@ -138,11 +139,8 @@ class MarketEnvironment:
         if params is None:
             # Sample parameters using observations from the previous minute
             const_params = np.array([S, S0, r, tau])
-            results, accept_rate = hmc_sample_fast(self.current_simulated_theta, const_params, n_samples=10000, step_size=0.0001, n_steps=100)
-
-            # Remove the first 7500 samples as burn-in and compute average params
-            filtered_results = results[7500:, :] # chains tend to converge after ~7500 iterations of burn-in
-            kappa, theta, sigma, rho, v0 = np.mean(filtered_results, axis=0)
+            results = run_hmc(self.current_simulated_theta, const_params, num_chains=num_hmc_chains, n_samples=10000)
+            kappa, theta, sigma, rho, v0 = np.mean(np.vstack([np.mean(np.vstack([results[i][:, j] for i in range(num_hmc_chains)]).T, axis=1)[7500:] for j in range(5)]).T, axis=0) # discard first 7500 points as burn-in
         else:
             kappa, theta, sigma, rho, v0 = params
         
@@ -192,6 +190,7 @@ class MarketEnvironment:
     
     @staticmethod
     def _order_fill(action: torch.Tensor, state: torch.Tensor) -> tuple[float, float, float, float, float, int]:
+        """Static method to control order fulfillment."""
         # Action
         buy_limit_price, buy_limit_num, sell_limit_price, sell_limit_num, num_stocks_market = action.tolist()
         buy_limit_num = int(buy_limit_num)
@@ -252,18 +251,3 @@ class MarketEnvironment:
         
         print(f"Summary:\nStocks bought: {num_stocks_bought}\nStocks sold: {num_stocks_sold}\nCurrent profit: {current_profit}\nTotal cash: {model_total_cash}\nTotal inv: {model_total_inv}\nEstimated total value: {model_total_cash + model_total_inv * market_price}")
         return num_stocks_bought, num_stocks_sold, current_profit, hedging_penalty, model_total_cash, model_total_inv
-
-
-if __name__ == "__main__":
-    # Examples
-    kappa = 2.0
-    theta = 0.04
-    sigma = 0.3
-    rho = -0.7
-    v0 = 0.04
-    initial_theta = np.array([kappa, theta, sigma, rho, v0])
-    env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "2010-01-01", initial_theta)
-    print("Done")
-
-# Actor takes in current environment and determines best action
-# Critic estimates the value function, V(s), which represents the expected cumulative reward starting from state s

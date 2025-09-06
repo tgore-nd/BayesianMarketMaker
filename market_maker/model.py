@@ -6,16 +6,14 @@ import torch.nn.functional as F
 from environment import MarketEnvironment
 from typing import Literal
 
-
+# Regularization parameters
 AIIF = 0.5
 INV_LIMIT = 10
 PRICE_LIMIT = 0.005
-# torch.autograd.set_detect_anomaly(True)
-
 
 class ReplayBuffer:
+    """The `ReplayBuffer` is used to store actual and simulated transitions."""
     def __init__(self, max_size: int, state_dim: int, action_dim: int):
-        """The `ReplayBuffer` is used to store actual and simulated transitions."""
         self.max_size = max_size
         self.ptr = 0
         self.size = 0
@@ -52,8 +50,8 @@ def mlp(sizes: list[int], activation, output_activation) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
-# Gaussian Policy network for action selection
 class GaussianPolicy(nn.Module):
+    """Gaussian Policy network for action selection."""
     def __init__(self, obs_dim: int, act_dim: int, hidden: tuple[int, int] = (256, 256), log_std_min: float = -20, log_std_max: float = 2):
         super().__init__()
         self.net = mlp([obs_dim]+list(hidden), activation=nn.ReLU, output_activation=nn.ReLU)
@@ -89,6 +87,9 @@ class GaussianPolicy(nn.Module):
 
 # Q Networks for the actors and critics
 class QNetwork(nn.Module):
+    """Actor takes in current environment and determines best action.
+    
+    Critic estimates the value function, V(s), which represents the expected cumulative reward starting from state s."""
     def __init__(self, obs_dim: int, act_dim: int, hidden=(256, 256)):
         super().__init__()
         self.net = mlp([obs_dim + act_dim] + list(hidden) + [1], activation=nn.ReLU, output_activation=nn.Identity)
@@ -98,6 +99,7 @@ class QNetwork(nn.Module):
 
 # SAC Agent
 class SACAgent:
+    """A soft actor-critic agent that interacts with the market environment via a `GaussianPolicy` and `QNetwork` actors and critics."""
     def __init__(self, state_dim: int = 11, action_dim: int = 5, device: Literal["cpu", "cuda"] = "cpu"):
         self.device = device
         self.actor = GaussianPolicy(state_dim, action_dim).to(device)
@@ -179,9 +181,18 @@ class SACAgent:
 # Transition simulation
 def generate_simulated_transitions(env: MarketEnvironment, initial_state: torch.Tensor, initial_action: torch.Tensor, n_samples: int = 1):
     """
-    env: environment providing reward function `env.reward(s,a,s_next)` and done predicate or terminal check
-    stochastic_model.sample_next_states(s, a, n_samples) -> np.array (n_samples, state_dim)
-    Returns list of (s, a, r, s_next)
+    Use the HMC-fitted Heston model to allow the model to learn from acting in the simulated space.
+
+    Parameters
+    ----------
+    env : MarketEnvironment
+        environment in which to simulate
+    initial_state : torch.Tensor
+        initial state tensor of environment
+    initial_action : torch.Tensor
+        initial action of model in environment that will be tested in simulation
+    n_samples : int
+        Number of transitions to simulate. Default is `1`, but I suggest making this larger to offset the cost of HMC.
     """
     current_state = initial_state
     current_action = initial_action
@@ -195,7 +206,26 @@ def generate_simulated_transitions(env: MarketEnvironment, initial_state: torch.
     return transitions
 
 # Training loop
-def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int = 100000, plan: bool = True):
+def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int = 100000, plan: bool = True) -> SACAgent:
+    """
+    Run the agent.
+    
+    Parameters
+    ----------
+    env : MarketEnvironment
+        The environment that the agent will explore and exploit.
+    initial_theta : np.ndarray
+        A guess for the initial Heston parameters (kappa, theta, sigma, rho, v0, r).
+    num_steps : int
+        The total number of steps to explore within the environment.
+    plan : bool
+        Whether or not to train on simulated transitions. Default is `True`.
+    
+    Returns
+    -------
+    agent : SACAgent
+        The `SACAgent` that has explored the environment.
+    """
     state_dim = 11
     action_dim = 5
     buffer = ReplayBuffer(200000, state_dim, action_dim)
@@ -211,14 +241,14 @@ def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int
         print(f"Final state: {next_state}")
         print(f"Reward: {reward}")
 
-        # Dyna imagination: generate model-based transitions from the *real* (s,a)
+        # Generate model-based transitions
         if plan:
             imagined = generate_simulated_transitions(env, initial_state, action, n_samples=10)
             for (s_i, a, r, s_f) in imagined:
                 buffer.add(s_i, a, r, s_f)
 
         # Train
-        if buffer.size > 1024: # 1024
+        if buffer.size > 1024:
             print("Training now...")
             for _ in range(1):  # gradient steps per env step
                 batch = buffer.sample(256)
@@ -235,7 +265,8 @@ if __name__ == "__main__":
     rho = -0.7
     v0 = 0.04
     initial_theta = np.array([kappa, theta, sigma, rho, v0])
-    env = MarketEnvironment("AAPL", r"C:\Users\tfgor\Documents\BayesianMarketMaker\data\deltalake", "2010-01-01", initial_theta)
+    path_to_delta_lake = "" # fill this in with your path
+    env = MarketEnvironment("AAPL", path_to_delta_lake, "2010-01-01", initial_theta)
     print("Done")
 
     train_loop(env, initial_theta, plan=False)

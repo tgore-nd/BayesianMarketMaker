@@ -28,20 +28,20 @@ def heston_posterior_grad_fd(theta: np.ndarray, const_params: np.ndarray, rel_ep
     """
     D = theta.shape[0]
     grad = np.empty(D, dtype=np.float64)
-    th = theta.copy()           # single allocation
-    base = bayesian_estimation.U_compiled(const_params, th)  # optional baseline (not required for central diff)
+    th = theta.copy() # single allocation
+    base = bayesian_estimation.U_compiled(const_params, th) # optional baseline (not required for central diff)
 
     for i in range(D):
         orig = th[i]
-        # relative epsilon avoids huge cancellation for small/large params
+        # Relative epsilon avoids huge cancellation for small/large params
         eps = rel_eps * max(1.0, np.abs(orig))
-        # forward
+        # Forward step
         th[i] = orig + eps
         up = bayesian_estimation.U_compiled(const_params, th)
-        # backward
+        # Backward
         th[i] = orig - eps
         down = bayesian_estimation.U_compiled(const_params, th)
-        # restore
+        # Restore
         th[i] = orig
         grad[i] = (up - down) / (2.0 * eps)
 
@@ -50,38 +50,8 @@ def heston_posterior_grad_fd(theta: np.ndarray, const_params: np.ndarray, rel_ep
 
 @njit
 def leapfrog_compiled(theta: np.ndarray, const_params: np.ndarray, p: np.ndarray, step_size: float, n_steps: int, inv_mass: float):
-    """
-    Perform L steps of the leapfrog integrator.
-    
-    Parameters
-    ----------
-    theta : ndarray, shape (D,)
-        Current position.
-    p : ndarray, shape (D,)
-        Current momentum.
-    grad_U : callable
-        Function ∇U(theta) returning gradient of potential.
-    step_size : float
-        Integrator step size (ε).
-    n_steps : int
-        Number of leapfrog steps (L).
-    inv_mass : ndarray or float
-        Inverse mass matrix (M^-1); can be scalar or diagonal array.
-    
-    Returns
-    -------
-    theta_new, p_new : ndarray, ndarray
-        The new position and (negated) momentum.
-    """
     # Get gradient
     grad_U = heston_posterior_grad_fd(theta, const_params)
-    # norm = np.linalg.norm(grad_U)
-    # print(theta, norm)
-
-    # if norm > 50:
-    #     print(f"Norm: {norm}")
-    #     print(f"Theta: {theta}")
-    #     print(f"U: {bayesian_estimation.U_compiled(const_params, theta)}\n")
 
     # Half‑step momentum update
     p = p - 0.5 * step_size * grad_U
@@ -107,8 +77,8 @@ def hmc_sample_fast(initial_theta: np.ndarray, const_params: np.ndarray, n_sampl
     
     Parameters
     ----------
-    initial_theta : ndarray, shape (D,)
-        Starting point for θ.
+    initial_theta : ndarrayy
+        Starting point for parameters `theta`.
     const_params : ndarray
         Parameters that are not estimated but must be passed into U to ensure modularity.
     U : callable
@@ -118,23 +88,22 @@ def hmc_sample_fast(initial_theta: np.ndarray, const_params: np.ndarray, n_sampl
     n_samples : int
         Number of MCMC samples to generate.
     step_size : float
-        Leapfrog step size ε.
+        Leapfrog step size.
     n_steps : int
-        Number of leapfrog steps L per iteration.
-    mass : float or ndarray
-        Mass (diagonal covariance for momentum). May be scalar or vector.
+        Number of leapfrog steps per iteration.
+    mass : float
+        Mass constant.
     
     Returns
     -------
-    samples : ndarray, shape (n_samples, D)
-        Collected samples of θ.
+    samples : ndarray
+        Collected samples of theta.
     accept_rate : float
         Proportion of proposals accepted.
     """
     theta = initial_theta
     inv_mass = 1.0 / mass
     D = theta.shape[0]
-    # norms = []
     
     samples = np.zeros((n_samples, D), dtype=np.float64)
     n_accept = 0
@@ -162,14 +131,37 @@ def hmc_sample_fast(initial_theta: np.ndarray, const_params: np.ndarray, n_sampl
     return samples, accept_rate
 
 
-def run_hmc(initial_theta: np.ndarray, const_params: np.ndarray, num_chains: int, n_samples: int = 10000, step_size: float = 0.0001, n_steps: int = 100, mass: float = 1.0):
-    # 1.25e-05
-    # 2.5e-05, 60
-    # 1.5e-05, 100
-    # 2.6e-05, 100
+def run_hmc(initial_theta: np.ndarray, const_params: np.ndarray, num_chains: int, n_samples: int = 10000, step_size: float = 0.0001, n_steps: int = 100, mass: float = 1.0, plot: bool = False) -> tuple[np.ndarray]:
+    """
+    Generate multiple HMC chains at the same time, powered by multiprocessing and JIT compilation.
+    
+    Parameters
+    ----------
+    initial_theta : np.ndarray
+        Initial guess for theta.
+    const_params : np.ndarray
+        An array of parameters that we don't estimate but need for likelihood function evaluation.
+    num_chains : int
+        The number of chains to sample.
+    n_samples : int
+        The number of samples in each chain. Default is `10000`.
+    step_size : float
+        The leapfrog step size. Default is `0.0001`. Larger `step_size` -> smaller acceptance rate. Tune to your data appropriately.
+    n_steps : int
+        The number of leapfrog steps. Default is `100`. Larger `step_size` -> smaller acceptance rate. Tune to your data appropriately.
+    mass : float
+        The mass constant. Default is `1.0`.
+    plot : bool
+        Whether or not to plot a result according to parameter `n` (hardcoded below). Default is `False`.
+    
+    Returns
+    -------
+    chains : tuple[np.ndarray]
+        A tuple of length `num_chains` giving the full samples for every chain.
+    """
     # Increasing n_steps decreases acceptance rate
     # Increasing step_size decreases acceptance rate
-    print(step_size, n_steps)
+    print(f"Beginning HMC with step size = {step_size} and n_steps = {n_steps}")
     jittered_thetas = np.random.normal(scale = 0.01, size = (num_chains, len(initial_theta))) + initial_theta
 
     # Get several chains at once
@@ -177,18 +169,20 @@ def run_hmc(initial_theta: np.ndarray, const_params: np.ndarray, num_chains: int
     with Pool(num_chains) as pool:
         results = pool.starmap(hmc_sample_fast, [(jittered_theta, const_params, n_samples, step_size, n_steps, mass) for jittered_theta in jittered_thetas])
     chains, accept_rates, = zip(*results)
-    print(accept_rates)
+    print(f"Acceptance rates: {accept_rates}")
     end = time.perf_counter()
-    print(f"Compiled: {end - start} seconds")
+    print(f"HMC Runtime: {end - start} seconds")
 
-    # Plot
-    # fig, axs = plt.subplots(5, num_chains)
-    # for chain_i in range(num_chains):
-    #     for i in range(5):
-    #         axs[i, chain_i].plot(chains[chain_i][:, i])
+    if plot:
+        n = 2 # change index as necessary to plot different parameter fits
+        plt.plot(np.mean(np.vstack([chains[i][:, n] for i in range(num_chains)]).T, axis=1), label=r"Average $\sigma$")
+        plt.xlabel("Iteration")
+        plt.ylabel("Parameter Value")
+        plt.title("Heston Model HMC Fit")
+        plt.legend()
+        plt.show()
 
-    # plt.tight_layout()
-    # plt.show()
+    return chains
 
 
 if __name__ == "__main__":
@@ -196,24 +190,24 @@ if __name__ == "__main__":
     theta = 0.04
     sigma = 0.3
     rho = -0.7
-    v0 = 0.04
+    v0 = 0.1
     r = 0.01
-    S0 = 100
-    tau = 1.0
+    S0 = 102.8
+    tau = 1 / 525600
     S = 103
 
     initial_theta = np.array([kappa, theta, sigma, rho, v0], dtype=np.float64)
     const_params = np.array([S, S0, r, tau], dtype=np.float64)
     
-    run_hmc(initial_theta, const_params, num_chains = 5)
+    chains = run_hmc(initial_theta, const_params, n_samples=20000, num_chains = 12, plot=True)
 
-    # thetas, rates, norms = hmc_sample_fast(initial_theta, const_params, n_samples=10000, step_size=2.6e-5, n_steps=100)
+    thetas, accept_rates = hmc_sample_fast(initial_theta, const_params, n_samples=20000, step_size=0.0001, n_steps=100)
 
-    # # Plot
-    # fig, axs = plt.subplots(5)
-    # for i in range(5):
-    #     axs[i].scatter(thetas[:, i], norms, s=0.3)
-    
-    # plt.xlim(0, 0.05)
-    # plt.tight_layout()
-    # plt.show()
+    plt.plot(thetas[:, 1], label=r"$\theta$")
+    plt.plot(thetas[:, 2], label=r"$\sigma$")
+    plt.plot(thetas[:, 4], label=r"$v_0$")
+    plt.xlabel("Iteration")
+    plt.ylabel("Parameter Value")
+    plt.title("Heston Model HMC Fit")
+    plt.legend()
+    plt.show()

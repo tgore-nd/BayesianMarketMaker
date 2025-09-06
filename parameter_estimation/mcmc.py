@@ -1,5 +1,6 @@
+# NOTE: Only the compiled versions are used in production. This version is old, but it is clear and modular and more nicely readable since it doesn't need to adhere to Numba constraints.
+
 import numpy as np
-import arviz as az
 import bayesian_estimation
 import time
 from typing import Callable
@@ -19,29 +20,6 @@ def posterior_grad(theta: np.ndarray, const_params: np.ndarray, posterior: Calla
 
 
 def leapfrog(U: Callable, theta: np.ndarray, const_params: np.ndarray, p: np.ndarray, step_size: float, n_steps: int, inv_mass: float):
-    """
-    Perform L steps of the leapfrog integrator.
-    
-    Parameters
-    ----------
-    theta : ndarray, shape (D,)
-        Current position.
-    p : ndarray, shape (D,)
-        Current momentum.
-    grad_U : callable
-        Function ∇U(theta) returning gradient of potential.
-    step_size : float
-        Integrator step size (ε).
-    n_steps : int
-        Number of leapfrog steps (L).
-    inv_mass : ndarray or float
-        Inverse mass matrix (M^-1); can be scalar or diagonal array.
-    
-    Returns
-    -------
-    theta_new, p_new : ndarray, ndarray
-        The new position and (negated) momentum.
-    """
     # Get gradient
     grad_U = posterior_grad(theta, const_params, U)
 
@@ -63,35 +41,6 @@ def leapfrog(U: Callable, theta: np.ndarray, const_params: np.ndarray, p: np.nda
 
 
 def hmc_sample(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable, n_samples: int, step_size: float, n_steps: int, mass: float = 1.0) -> tuple[np.ndarray, float]:
-    """
-    Run Hamiltonian Monte Carlo.
-    
-    Parameters
-    ----------
-    initial_theta : ndarray, shape (D,)
-        Starting point for θ.
-    const_params : ndarray
-        Parameters that are not estimated but must be passed into U to ensure modularity.
-    U : callable
-        Potential energy function. U(theta) = -log p(theta) up to const.
-    grad_U : callable
-        Gradient of U.
-    n_samples : int
-        Number of MCMC samples to generate.
-    step_size : float
-        Leapfrog step size ε.
-    n_steps : int
-        Number of leapfrog steps L per iteration.
-    mass : float or ndarray
-        Mass (diagonal covariance for momentum). May be scalar or vector.
-    
-    Returns
-    -------
-    samples : ndarray, shape (n_samples, D)
-        Collected samples of θ.
-    accept_rate : float
-        Proportion of proposals accepted.
-    """
     theta = np.array(initial_theta, dtype=np.float64)
     inv_mass = 1.0 / mass
     D = theta.shape[0]
@@ -100,7 +49,6 @@ def hmc_sample(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable,
     n_accept = 0
     
     for i in range(n_samples):
-        # print(f"Sample: {i}")
         # Sample auxiliary momentum
         p0 = np.random.normal(0, np.sqrt(mass), size=D)
         
@@ -120,32 +68,6 @@ def hmc_sample(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable,
     
     accept_rate = n_accept / n_samples
     return samples, accept_rate
-
-
-def discard_burn_in(chains: list[np.ndarray], max_rhat: float = 1.01, min_retained: int = 100, search_step_size: int = 10) -> tuple[list[np.ndarray], int]:
-    n_chains = len(chains)
-    n_samples, n_params = chains[0].shape
-
-    # Stack into shape (n_chains, n_samples, n_params)
-    stacked = np.stack(chains)
-
-    # Test progressive burn-in cutoffs
-    for burnin in range(0, n_samples - min_retained, search_step_size):
-        trimmed = stacked[:, burnin:, :]
-
-        # Convert to InferenceData for ArviZ
-        idata = az.from_dict(posterior={f"param_{i}": trimmed[..., i] for i in range(n_params)})
-
-        # Compute R-hat for all parameters
-        rhats = az.rhat(idata, method="rank").to_dataarray().values # type: ignore
-
-        # If all params are converged, accept this burn-in point
-        if np.all(rhats < max_rhat):
-            return [chain[burnin:] for chain in chains], burnin
-
-    # If never converged, return full chains with warning
-    print("Warning: R-hat threshold not met. Returning full chains.")
-    return chains, 0
 
 
 def run_hmc(initial_theta: np.ndarray, const_params: np.ndarray, U: Callable, num_chains: int, n_samples: int = 3000, step_size: float = 0.001, n_steps: int = 5, mass: float = 1.0):

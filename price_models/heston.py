@@ -7,14 +7,13 @@ from numba import njit
 @njit
 def heston_cf(phi: np.ndarray, tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, r: float, S0: float) -> np.ndarray:
     """
-    Heston characteristic function: returns E[exp(i * phi * ln(S_T))]
-    following the risk-neutral characteristic function form.
+    Heston characteristic function: returns E[exp(i * phi * ln(S_T))] following the risk-neutral characteristic function form.
     
     Parameters
     ----------
-    phi   : complex or array_like
+    phi : complex or array_like
         Integration variable (argument of the CF), i.e. φ.
-    tau   : float, passed
+    tau : float, passed
         Time to maturity T (in YEARS). Amount of time into the future you care about modeling, daily: tau = 1/252, monthly: tau = 1/12, etc
     kappa : float, estimated
         Mean reversion rate of variance (κ).
@@ -22,13 +21,13 @@ def heston_cf(phi: np.ndarray, tau: float, kappa: float, theta: float, sigma: fl
         Long-run variance (θ).
     sigma : float, estimated
         Volatility of variance or "vol of vol" (σ).
-    rho   : float, estimated
+    rho : float, estimated
         Correlation between asset and variance Brownian motions (ρ).
-    v0    : float, estimated
+    v0 : float, estimated
         Initial variance at t=0 (v₀).
-    r     : float, passed
+    r : float, passed
         Risk-free interest rate (r).
-    S0    : float, passed
+    S0 : float, passed
         Initial asset price (S₀), (log-price cf).
     """
     i = 1j
@@ -54,7 +53,6 @@ def heston_likelihood(S: float, kappa: float, theta: float, sigma: float, rho: f
     """Find the likelihood of S in time tau at current price S0."""
     # Get log prices
     if S == 0:
-        # Asymptotically, the likelihood will be zero here (look at the graph to confirm)
         return 0
     
     x = np.log(S)
@@ -75,7 +73,6 @@ def heston_likelihood_compiled(S: float, kappa: float, theta: float, sigma: floa
     """Find the likelihood of S in time tau at current price S0."""
     # Get log prices
     if S == 0:
-        # Asymptotically, the likelihood will be zero here (look at the graph to confirm)
         return 0
     
     x = np.log(S)
@@ -129,20 +126,34 @@ def price_prob(characteristic_func: Callable, tau: float, kappa: float, theta: f
 def generate_sample_paths(tau: float, kappa: float, theta: float, sigma: float, rho: float, v0: float, S0: float, r: float, N: int, M: int) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate sample paths using Bayesian-estimated parameters.
-    Inputs:
-     - tau   : time of simulation
-     - kappa : rate of mean reversion in variance process
-     - theta : long-term mean of variance process
-     - sigma : vol of vol / volatility of variance process
-     - rho   : correlation between asset returns and variance
-     - S0, v0: initial parameters for asset and variance
-     - r     : interest rate
-     - N     : number of time steps
-     - M     : number of asset paths
     
-    Outputs:
-    - asset prices over time (numpy array)
-    - variance over time (numpy array)
+    Parameters
+    ---------
+    tau : float
+        time of simulation (in years)
+    kappa : float
+        rate of mean reversion in variance process
+    theta : float
+        long-term mean of variance process
+    sigma : float
+        vol of vol / volatility of variance process
+    rho : float
+        correlation between asset returns and variance
+    S0 : float
+        initial parameter for asset price
+    v0 : float
+        initial parameter for variance
+    r : float
+        interest rate
+    N : int
+        number of time steps
+    M : int
+        number of asset paths
+    
+    Returns
+    -------
+    asset_price_path : np.ndarray
+    variance_path : np.ndarray
     """
     # initialise other parameters
     dt = tau/N

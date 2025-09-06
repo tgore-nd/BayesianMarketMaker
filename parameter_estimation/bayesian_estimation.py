@@ -1,3 +1,5 @@
+# NOTE: Only the compiled versions are used in production. This version is old, but it is clear and modular and more nicely readable since it doesn't need to adhere to Numba constraints.
+
 import numpy as np
 from scipy.stats import gamma, invgamma, uniform
 from price_models.heston import heston_likelihood # the likelihood function
