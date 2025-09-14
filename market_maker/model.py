@@ -7,7 +7,7 @@ from environment import MarketEnvironment
 from typing import Literal
 
 # Regularization parameters
-AIIF = 0.5
+AIIF = 0.2 # risk aversion factor
 INV_LIMIT = 10
 PRICE_LIMIT = 0.005
 
@@ -108,7 +108,7 @@ class SACAgent:
         self.q1_target = QNetwork(state_dim, action_dim).to(device)
         self.q2_target = QNetwork(state_dim, action_dim).to(device)
 
-        # Copy weights to targets
+        # Copy weights to targets (since they aren't trained directly)
         self.q1_target.load_state_dict(self.q1.state_dict())
         self.q2_target.load_state_dict(self.q2.state_dict())
 
@@ -206,7 +206,7 @@ def generate_simulated_transitions(env: MarketEnvironment, initial_state: torch.
     return transitions
 
 # Training loop
-def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int = 100000, plan: bool = True) -> SACAgent:
+def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int = 100000, simulate_transitions: bool = True) -> SACAgent:
     """
     Run the agent.
     
@@ -242,14 +242,14 @@ def train_loop(env: MarketEnvironment, initial_theta: np.ndarray, num_steps: int
         print(f"Reward: {reward}")
 
         # Generate model-based transitions
-        if plan:
+        if simulate_transitions:
             imagined = generate_simulated_transitions(env, initial_state, action, n_samples=10)
             for (s_i, a, r, s_f) in imagined:
                 buffer.add(s_i, a, r, s_f)
 
         # Train
         if buffer.size > 1024:
-            print("Training now...")
+            env.exit_exploration_phase()
             for _ in range(1):  # gradient steps per env step
                 batch = buffer.sample(256)
                 agent.update(batch)
@@ -265,8 +265,8 @@ if __name__ == "__main__":
     rho = -0.7
     v0 = 0.04
     initial_theta = np.array([kappa, theta, sigma, rho, v0])
-    path_to_delta_lake = "" # fill this in with your path
-    env = MarketEnvironment("AAPL", path_to_delta_lake, "2010-01-01", initial_theta)
+    path_to_delta_lake = r"data\deltalake" # fill this in with your path
+    env = MarketEnvironment("AMZN", path_to_delta_lake, "2010-01-01", initial_theta)
     print("Done")
 
-    train_loop(env, initial_theta, plan=False)
+    train_loop(env, initial_theta, simulate_transitions=True)

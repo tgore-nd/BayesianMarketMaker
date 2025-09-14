@@ -15,20 +15,21 @@ class MarketEnvironment:
         self.start_date = datetime.strptime(start_date, "%Y-%m-%d")
 
         # Import associated price data
-        self.data = duckdb.sql(f"SELECT * FROM delta_scan('{deltalake_directory}') WHERE Ticker = '{ticker}' AND STRPTIME(timestamp, '%Y-%m-%d %H:%M:%S') >= STRPTIME('{start_date}', '%Y-%m-%d') ORDER BY timestamp")
+        self.data = duckdb.sql(f"SELECT * FROM delta_scan('{deltalake_directory}') WHERE Ticker = '{ticker}' AND STRPTIME(timestamp, '%Y-%m-%d %H:%M:%S') >= STRPTIME('{start_date}', '%Y-%m-%d') ORDER BY timestamp").pl()
 
         # Baseline parameters
         self.reset(initial_theta)
 
-    def reset(self, initial_theta: np.ndarray) -> torch.Tensor:
+    def reset(self, initial_theta: np.ndarray, start_step: int = 1) -> torch.Tensor:
         """Reset the environment and return the initial state."""
-        self.current_step: int = 1
+        self.current_step: int = start_step
         self.horizon_timestep = 0
         self.model_total_cash: float = 100.0
         self.model_total_inv: int = 10
-        self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
-        self.prev_prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step - 1).pl()
-        self.interest_rates = pl.read_csv("./data/DGS3MO.csv", schema={"observation_date": pl.Datetime, "DGS3MO": pl.Float64}, null_values="").filter(pl.col("observation_date") >= self.start_date)
+        self.prices = self.data["open", "high", "low", "close"][self.current_step]
+        self.current_date = datetime.strptime(self.data.select("timestamp")[self.current_step].item(), '%Y-%m-%d %H:%M:%S')
+        self.prev_prices = self.data["open", "high", "low", "close"][self.current_step - 1]
+        self.interest_rates = pl.read_csv("./data/DGS3MO.csv", schema={"observation_date": pl.Datetime, "DGS3MO": pl.Float64}, null_values="").filter(pl.col("observation_date") >= self.current_date)
         # Unfortunately, I only have access to OHLCV data. This could be way more nuanced with L1 or L2 data.
 
         # Set Heston params
@@ -37,13 +38,13 @@ class MarketEnvironment:
         # Tracking variables (not returned, but used in state computation later)
         self.mid_prices = [(self.prices["high"][0] + self.prices["low"][0]) / 2]
         self.inv_count: list = [self.model_total_inv]
-        self.dynamic_thresholds: list = [1]
+        self.dynamic_thresholds: list = [0.5]
         self.pnl: list = [0]
         self.profit: list = [0]
 
         # Environment state variables
         mid_prices_change = self.mid_prices[0]
-        self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
+        self.prices = self.data["open", "high", "low", "close"][self.current_step]
 
         # Model state variables
         num_stocks_bought: int = 0 # num stocks bought in the interval
@@ -60,6 +61,7 @@ class MarketEnvironment:
         self.simulated_mid_prices: list = self.mid_prices
         self.current_simulated_theta: np.ndarray = self.current_theta
         self.simulation_start_index: int = len(self.simulated_profit)
+        self.exploration_period = True
 
         # Return
         env_state = torch.concat([self.prices.to_torch().ravel(), torch.tensor([mid_prices_change])], dim=0)
@@ -67,18 +69,6 @@ class MarketEnvironment:
         self.state = torch.hstack([env_state, model_state])
 
         return self.state
-    
-    def reset_simulation(self) -> None:
-        """Reset the simulation to build off the current actual values."""
-        # Use current arrays as starting values
-        self.simulated_profit: list = self.profit
-        self.simulated_inv_count: list = self.inv_count
-        self.simulated_dynamic_thresholds: list = self.dynamic_thresholds
-        self.simulated_pnl: list = self.pnl
-        self.simulated_prev_close: float = self.prev_prices["close"][0]
-        self.simulated_mid_prices: list = self.mid_prices
-        self.current_simulated_theta: np.ndarray = self.current_theta
-        self.simulation_start_index: int = len(self.simulated_profit)
 
     def step(self, action: torch.Tensor, AIIF: float) -> tuple[torch.Tensor, float]:
         """Given an action in the MarketEnvironment, return the next OHLCV array in self.data and the model's total inventory and profit.
@@ -89,7 +79,8 @@ class MarketEnvironment:
         self.prev_prices = self.prices
 
         self.current_step += 1
-        self.prices = self.data.select("open, high, low, close").limit(n=1, offset=self.current_step).pl()
+        self.prices = self.data["open", "high", "low", "close"][self.current_step]
+        self.current_date = datetime.strptime(self.data.select("timestamp")[self.current_step].item(), '%Y-%m-%d %H:%M:%S')
         close_price = self.prices["close"][0]
         high_price = self.prices["high"][0]
         low_price = self.prices["low"][0]
@@ -100,7 +91,7 @@ class MarketEnvironment:
 
         # Penalty function
         # Update the inventory and dynamic threshold arrays
-        DITF = 0 if self.model_total_inv == 0 else self.model_total_cash / (self.model_total_inv * close_price)
+        DITF = 0.5 if self.model_total_inv == 0 else self.model_total_cash / (self.model_total_inv * close_price)
         inv_penalty = AIIF * min(1, float(np.mean(self.inv_count) / np.mean(self.dynamic_thresholds)))
 
         # Appends
@@ -188,6 +179,14 @@ class MarketEnvironment:
 
         return new_simulated_state, reward, np.array([kappa, theta, sigma, rho, v0]) # add model attributes: inventory, total cash, last quoted spread, estimated market spread
     
+    def exit_exploration_phase(self) -> None:
+        if self.exploration_period:
+            print("TRAINING PERIOD STARTED...")
+            self.training_start_step = self.current_step
+            # Reset inventory and total money
+            self.reset(self.current_theta, start_step=self.current_step)
+            self.exploration_period = False
+
     @staticmethod
     def _order_fill(action: torch.Tensor, state: torch.Tensor) -> tuple[float, float, float, float, float, int]:
         """Static method to control order fulfillment."""
