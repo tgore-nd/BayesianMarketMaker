@@ -38,10 +38,14 @@ This final result is the set of parameters that the target networks will use. Th
 
 #### Reward Function
 For the reward function, I took inspiration from Óscar Fernández Vincente's paper [Automated market maker inventory management with deep reinforcement learning](https://doi.org/10.1007/s10489-023-04647-9). He defines two control coefficients, the *Alpha Inventory Impact Factor* (AIIF) and the *Dynamic Inventory Threshold Factor*. These coefficients help control the model's inventory management, according to the following reward function $R$:
+
 $$ R = \text{profit from buying/selling at current step} + \text{profit from stock price change at current step} - \text{hedging penalty} - \text{penalty term} $$
 
 The AIIF and DITF are defined in the penalty term:
-$$ \text{penalty term} = \text{AIIF}\cdot \text{min}(1, \frac{\text{avg inventory count}}{\text{avg threshold}})\\\text{avg threshold}=\text{DITF}\cdot |\frac{\text{cash at current step}}{\text{average mid price}} $$
+
+$$ \text{penalty term} = \text{AIIF}\cdot \text{min}(1, \frac{\text{avg inventory count}}{\text{avg threshold}})$$
+
+$$\text{avg threshold}=\text{DITF}\cdot \lvert\frac{\text{cash at current step}}{\text{average mid price}}\rvert $$
 
 The DITF is computed by dividing the proportion between the cash and the inventory. The AIIF controls the risk aversion of the model, which clearly increases and decreases the penalty. Note that I simplified the penalty term slightly from the version in the paper to make it less intensive to compute at each step.
 
@@ -57,12 +61,15 @@ To ensure that the simulated data accurately represents transitions that the mod
 - Initial variance: $v_0$
 
 These parameters are fitted via the *Hamiltonian Monte Carlo* (HMC) procedure. Consider a target distribution $p(\boldsymbol{\theta})$, where $\boldsymbol{\theta}$ is our vector of the above parameters. Hamiltonian Monte Carlo allows us to sample from this distribution by simulating Hamiltonian dynamics in the system, resulting in substantially faster MCMC chain generation than typical MCMC regimes, like Metropolis-Hastings or random walk. To do this, we model our vector $\boldsymbol{\theta}$ as a "position" and momentum as normally distributed. The target distribution can be expressed in terms of the potential energy $U(\boldsymbol{\theta})$ as follows:
+
 $$ p(\boldsymbol{\theta}) \propto \text{exp}(-U(\boldsymbol{\theta})) $$
 
 From Hamiltonian mechanics, we know that the Hamiltonian (or, in a conservative system, the total energy) is given by:
+
 $$ H(\boldsymbol{\theta}, p) = U(\boldsymbol{\theta}) + K(p) $$
 
 By randomly sampling from the standard normal distribution for $p$, we can effectively sample our parameters $\boldsymbol{\theta}$, weighted by where in the Hamiltonian system they are most likely to occur. The evolution is simulated according to Hamilton's equations, which are physically motivated. Gradients of the potential energy are computed using the leapfrog integrator.
+
 $$ \frac{dp}{dt} = -\frac{\partial H}{\partial\theta}=-\nabla U(\boldsymbol{\theta}) $$
 
 In general, the algorithm is:
