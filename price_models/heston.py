@@ -172,19 +172,3 @@ def generate_sample_paths(tau: float, kappa: float, theta: float, sigma: float, 
         v[i] = np.maximum(v[i - 1] + kappa*(theta - v[i - 1]) * dt + sigma * np.sqrt(v[i - 1] * dt) * Z[i - 1, :, 1], 0)
     
     return S.T, v.T
-
-
-if __name__ == "__main__":
-    kappa = 2.0
-    theta = 0.04
-    sigma = 0.3
-    rho = -0.7
-    v0 = 0.04
-    r = 0.01
-    S0 = 100
-    tau = 1.0
-    #K = 125
-
-    K = np.arange(0, 100)
-
-    print(heston_likelihood(102, kappa, theta, sigma, rho, v0, r, S0, tau))

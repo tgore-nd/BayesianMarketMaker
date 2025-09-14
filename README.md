@@ -1,10 +1,14 @@
-# Deep Reinforcement Learning Market Making Algorithm with Model-Based Planning
+# Deep Reinforcement Learning Market Making Algorithm with Model-Based Simulations
 ## Overview
 ### Features
-
+* A Soft Actor-Critic (SAC) deep reinforcement learning agent in PyTorch that optimizes bid/ask quoting and dynamically manage inventory in a market making environment
+* A Hamiltonian Monte Carlo (HMC) MCMC sampler that simulates stochastic transitions between states using the Heston model
+* A custom market environment controlling order satisfaction on 1-minute interval equity data
+* Optimized heavy numerical calculations (like Leapfrog) via Numba's JIT compilation
+* Loops parallelized via multiprocessing to simulate several MCMC chains in parallel
 
 ### About Me
-
+I am a Physics & Applied Mathematics major at the University of Notre Dame. I have extensive experience in data analytics, mathematical modeling, and machine learning throughout experimental nuclear physics, an NSF undergraduate research fellowship, and a quantitative finance internship. If you would like to get in touch, please reach out via email at [tgore@nd.edu](mailto:tgore@nd.edu).
 
 ## Introduction
 A *market maker* is someone who actively quotes both buy and sell orders on a security, allowing them to profit off the bid ask spread. Market makers help provide liquidity in financial markets, allowing other investors to easily buy and sell a security that may otherwise see limited trading activity. Market makers face an important set of decisions when their orders are open: the amount of inventory to quote and where to place their buy and sell orders. Executing these decisions poorly can significantly inhibit the market maker's ability to maintain a positive expected value on their spread, especially when there are other firms competing on the same security.
@@ -21,18 +25,39 @@ $$
     J(\pi) = \sum_t E_{(s_t, a_t) \sim \pi}[r(s_t, a_t) + \alpha H(\pi(\cdot|s_t))]
 \end{aligned}
 $$
+
+Note that $E$ is the expectation operator.
+
 The model has the following neural network components:
 #### Policy network (Actor)
 A stochastic policy fitted using deep learning that samples actions, given a state. This serves as the *actor*, fitting a probability distribution over the potential actions in the environment.
 
 #### Q-Networks (Critics)
-The model estimates two Q-functions, which serve as the *critics*. Q-networks endeavor to assess the value of potential actions in the environment. In the context of SAC models, each Q-network "grades" the quality $Q$ of the action. In practice, we balance the parameter updates of these networks across four different Q-networks. Two of these networks are trained directly, and two are "target" networks, which are gradually updated with the parameters of the directly-trained networks. We then use the polyak averaging procedure to average the parameters of the two models:
+The model estimates two Q-functions, which serve as the *critics*. Q-networks endeavor to assess the value of potential actions in the environment. In the context of SAC models, each Q-network "grades" the quality $Q$ of the action. In practice, we balance the parameter updates of these networks across four different Q-networks. Two of these networks are trained directly (i.e., online), and two are "target" networks, which are gradually updated with the parameters of the directly-trained networks via the polyak procedure. We then use polyak to update the target network parameters:
 $$
 \begin{aligned}
     \theta_\text{target} \leftarrow \theta_\text{target} \rho + (1 - \rho) \theta
 \end{aligned}
 $$
 This final result is the set of parameters that the target networks will use. This way, the training is greatly stabilized.
+
+#### Reward Function
+For the reward function, I took inspiration from Óscar Fernández Vincente's paper [Automated market maker inventory management with deep reinforcement learning](https://doi.org/10.1007/s10489-023-04647-9). He defines two control coefficients, the *Alpha Inventory Impact Factor* (AIIF) and the *Dynamic Inventory Threshold Factor*. These coefficients help control the model's inventory management, according to the following reward function $R$:
+$$
+\begin{aligned}
+    R = \text{profit from buying/selling at current step} + \text{profit from stock price change at current step} - \text{hedging penalty} - \text{penalty term}
+\end{aligned}
+$$
+
+The AIIF and DITF are defined in the penalty term:
+$$
+\begin{aligned}
+    \text{penalty term} = \text{AIIF}\cdot \text{min}(1, \frac{\text{avg inventory count}}{\text{avg threshold}})\\
+    \text{avg threshold}=\text{DITF}\cdot |\frac{\text{cash at current step}}{\text{average mid price}}|
+\end{aligned}
+$$
+
+The DITF is computed by dividing the proportion between the cash and the inventory. The AIIF controls the risk aversion of the model, which clearly increases and decreases the penalty. Note that I simplified the penalty term slightly from the version in the paper to make it less intensive to compute at each step.
 
 ## Simulating Transitions
 ### Hamiltonian Monte Carlo

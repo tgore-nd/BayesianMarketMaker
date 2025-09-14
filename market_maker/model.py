@@ -265,7 +265,7 @@ if __name__ == "__main__":
     rho = -0.7
     v0 = 0.04
     initial_theta = np.array([kappa, theta, sigma, rho, v0])
-    path_to_delta_lake = r"data\deltalake" # fill this in with your path
+    path_to_delta_lake = r"" # fill this in with your path
     env = MarketEnvironment("AMZN", path_to_delta_lake, "2010-01-01", initial_theta)
     print("Done")
 
