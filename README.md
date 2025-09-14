@@ -20,11 +20,7 @@ Mathematically speaking, market making is a problem of optimal decision making. 
 In general, reinforcement learning models learn a policy function $\pi_\theta$ that maps states of the environment to optimal actions that the agent can take to maximize its reward. In the context of market making, we teach the model to devise limit orders that maximize its reward function when receiving actual market data.
 
 Soft actor-critic (SAC) models are special because they attempt to maximize a tradeoff between reward and entropy. This means that the model tries to learn policies that get a high reward but also stay as random as possible. For environment reward $r(s_t, a_t)$, policy entropy (at $s_t$) $H(\pi(\cdot|s_t)) = -E[\text{log}(\pi((a_t|s_t)))]$, and regularization parameter $\alpha$ controlling exploration versus exploitation, we maximize:
-$$
-\begin{aligned}
-    J(\pi) = \sum_t E_{(s_t, a_t) \sim \pi}[r(s_t, a_t) + \alpha H(\pi(\cdot|s_t))]
-\end{aligned}
-$$
+$$J(\pi) = \sum_t E_{(s_t, a_t) \sim \pi}[r(s_t, a_t) + \alpha H(\pi(\cdot|s_t))]$$
 
 Note that $E$ is the expectation operator.
 
@@ -34,27 +30,21 @@ A stochastic policy fitted using deep learning that samples actions, given a sta
 
 #### Q-Networks (Critics)
 The model estimates two Q-functions, which serve as the *critics*. Q-networks endeavor to assess the value of potential actions in the environment. In the context of SAC models, each Q-network "grades" the quality $Q$ of the action. In practice, we balance the parameter updates of these networks across four different Q-networks. Two of these networks are trained directly (i.e., online), and two are "target" networks, which are gradually updated with the parameters of the directly-trained networks via the polyak procedure. We then use polyak to update the target network parameters:
-$$
-\begin{aligned}
-    \theta_\text{target} \leftarrow \theta_\text{target} \rho + (1 - \rho) \theta
-\end{aligned}
-$$
+
+$$\theta_\text{target} \leftarrow \theta_\text{target} \rho + (1 - \rho) \theta$$
+
 This final result is the set of parameters that the target networks will use. This way, the training is greatly stabilized.
 
 #### Reward Function
 For the reward function, I took inspiration from Óscar Fernández Vincente's paper [Automated market maker inventory management with deep reinforcement learning](https://doi.org/10.1007/s10489-023-04647-9). He defines two control coefficients, the *Alpha Inventory Impact Factor* (AIIF) and the *Dynamic Inventory Threshold Factor*. These coefficients help control the model's inventory management, according to the following reward function $R$:
 $$
-\begin{aligned}
     R = \text{profit from buying/selling at current step} + \text{profit from stock price change at current step} - \text{hedging penalty} - \text{penalty term}
-\end{aligned}
 $$
 
 The AIIF and DITF are defined in the penalty term:
 $$
-\begin{aligned}
     \text{penalty term} = \text{AIIF}\cdot \text{min}(1, \frac{\text{avg inventory count}}{\text{avg threshold}})\\
     \text{avg threshold}=\text{DITF}\cdot |\frac{\text{cash at current step}}{\text{average mid price}}|
-\end{aligned}
 $$
 
 The DITF is computed by dividing the proportion between the cash and the inventory. The AIIF controls the risk aversion of the model, which clearly increases and decreases the penalty. Note that I simplified the penalty term slightly from the version in the paper to make it less intensive to compute at each step.
@@ -72,23 +62,17 @@ To ensure that the simulated data accurately represents transitions that the mod
 
 These parameters are fitted via the *Hamiltonian Monte Carlo* (HMC) procedure. Consider a target distribution $p(\boldsymbol{\theta})$, where $\boldsymbol{\theta}$ is our vector of the above parameters. Hamiltonian Monte Carlo allows us to sample from this distribution by simulating Hamiltonian dynamics in the system, resulting in substantially faster MCMC chain generation than typical MCMC regimes, like Metropolis-Hastings or random walk. To do this, we model our vector $\boldsymbol{\theta}$ as a "position" and momentum as normally distributed. The target distribution can be expressed in terms of the potential energy $U(\boldsymbol{\theta})$ as follows:
 $$
-\begin{aligned}
     p(\boldsymbol{\theta}) \propto \text{exp}(-U(\boldsymbol{\theta}))
-\end{aligned}
 $$
 
 From Hamiltonian mechanics, we know that the Hamiltonian (or, in a conservative system, the total energy) is given by:
 $$
-\begin{aligned}
-H(\boldsymbol{\theta}, p) = U(\boldsymbol{\theta}) + K(p)
-\end{aligned}
+    H(\boldsymbol{\theta}, p) = U(\boldsymbol{\theta}) + K(p)
 $$
 
 By randomly sampling from the standard normal distribution for $p$, we can effectively sample our parameters $\boldsymbol{\theta}$, weighted by where in the Hamiltonian system they are most likely to occur. The evolution is simulated according to Hamilton's equations, which are physically motivated. Gradients of the potential energy are computed using the leapfrog integrator.
 $$
-\begin{aligned}
     \frac{dp}{dt} = -\frac{\partial H}{\partial\theta}=-\nabla U(\boldsymbol{\theta})
-\end{aligned}
 $$
 
 In general, the algorithm is:
